@@ -1,0 +1,36 @@
+services:
+  outlook-mail-reader:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: outlookemail:local
+    container_name: outlook-mail-reader
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-5000}:${PORT:-5000}"
+    volumes:
+      - ./data:/app/data
+    environment:
+      SECRET_KEY: "${SECRET_KEY:-}"
+      SECRET_KEY_FILE: "${SECRET_KEY_FILE:-/app/data/secret_key}"
+      LOGIN_USERNAME: "${LOGIN_USERNAME:-admin}"
+      LOGIN_PASSWORD: "${LOGIN_PASSWORD:-admin123}"
+      PORT: "${PORT:-5000}"
+      HOST: "${HOST:-0.0.0.0}"
+      FLASK_ENV: "${FLASK_ENV:-production}"
+      DATABASE_PATH: "${DATABASE_PATH:-data/outlook_accounts.db}"
+      GPTMAIL_BASE_URL: "${GPTMAIL_BASE_URL:-https://mail.chatgpt.org.uk}"
+      GPTMAIL_API_KEY: "${GPTMAIL_API_KEY:-gpt-test}"
+      DUCKMAIL_BASE_URL: "${DUCKMAIL_BASE_URL:-https://api.duckmail.sbs}"
+      DUCKMAIL_API_KEY: "${DUCKMAIL_API_KEY:-}"
+      CLOUDFLARE_WORKER_DOMAIN: "${CLOUDFLARE_WORKER_DOMAIN:-}"
+      CLOUDFLARE_EMAIL_DOMAINS: "${CLOUDFLARE_EMAIL_DOMAINS:-}"
+      CLOUDFLARE_ADMIN_PASSWORD: "${CLOUDFLARE_ADMIN_PASSWORD:-}"
+      OAUTH_CLIENT_ID: "${OAUTH_CLIENT_ID:-}"
+      OAUTH_REDIRECT_URI: "${OAUTH_REDIRECT_URI:-}"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:${PORT:-5000}/login >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s

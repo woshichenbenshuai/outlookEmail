@@ -124,11 +124,10 @@ docker pull ghcr.io/assast/outlookemail:latest
 # 运行容器
 docker run -d \
   --name outlook-mail-reader \
-  -p 5000:5000 \
+  -p 17001:5000 \
   -v $(pwd)/data:/app/data \
   -e LOGIN_USERNAME=admin \
   -e LOGIN_PASSWORD=admin123 \
-  -e SECRET_KEY=your-secret-key-here \
   ghcr.io/assast/outlookemail:latest
 ```
 
@@ -138,34 +137,26 @@ docker run -d \
 git clone https://github.com/assast/outlookEmail.git
 cd outlookEmail
 pip install -r requirements.txt
-export SECRET_KEY=your-secret-key-here
 python web_outlook_app.py
 ```
 
-访问 `http://localhost:5000` 即可使用。
+访问 `http://localhost:5000`（或你映射的端口）即可使用。
 
 ### 使用 Docker Compose
 
-```yaml
-version: '3.8'
-services:
-  outlook-mail-reader:
-    image: ghcr.io/assast/outlookemail:latest
-    container_name: outlook-mail-reader
-    ports:
-      - "5000:5000"
-    volumes:
-      - ./data:/app/data
-    environment:
-      - LOGIN_USERNAME=admin
-      - LOGIN_PASSWORD=admin123
-      - SECRET_KEY=your-secret-key-here
-      - FLASK_ENV=production
-    restart: unless-stopped
-```
-
 ```bash
-docker-compose up -d
+# 1) 准备环境变量文件
+cp .env.example .env
+
+# 2) 按需修改 .env（例如端口和登录账号）
+# PORT=5000
+# HOST_PORT=17001
+# LOGIN_USERNAME=admin
+# LOGIN_PASSWORD=你的强密码
+# SECRET_KEY 可留空：首次启动会自动生成并写入 data/secret_key
+
+# 3) 使用仓库内置的 docker-compose.yml 启动
+docker compose up -d --build
 ```
 
 ## 📖 使用说明

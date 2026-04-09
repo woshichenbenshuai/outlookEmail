@@ -11,11 +11,10 @@ docker pull ghcr.io/assast/outlookemail:latest
 # 运行容器
 docker run -d \
   --name outlook-mail-reader \
-  -p 5000:5000 \
+  -p 17001:5000 \
   -v $(pwd)/data:/app/data \
   -e LOGIN_USERNAME=admin \
   -e LOGIN_PASSWORD=admin123 \
-  -e SECRET_KEY=your-secret-key-here \
   ghcr.io/assast/outlookemail:latest
 
 # 查看日志
@@ -43,8 +42,8 @@ cd outlookEmail
 pip install -r requirements.txt
 
 # 设置环境变量（可选）
+export LOGIN_USERNAME=admin
 export LOGIN_PASSWORD=admin123
-export SECRET_KEY=your-secret-key-here
 export PORT=5000
 
 # 运行应用
@@ -55,50 +54,44 @@ python web_outlook_app.py
 
 ## 使用 Docker Compose
 
-```yaml
-version: '3.8'
-
-services:
-  outlook-mail-reader:
-    image: ghcr.io/assast/outlookemail:latest
-    container_name: outlook-mail-reader
-    ports:
-      - "5000:5000"
-    volumes:
-      - ./data:/app/data
-    environment:
-      - LOGIN_USERNAME=admin
-      - LOGIN_PASSWORD=admin123
-      - SECRET_KEY=your-secret-key-here
-      - FLASK_ENV=production
-      - GPTMAIL_API_KEY=your-api-key
-    restart: unless-stopped
-```
+仓库已内置 [docker-compose.yml](../docker-compose.yml)，可直接使用。
 
 ```bash
+# 1) 复制环境变量模板
+cp .env.example .env
+
+# 2) 按需修改 .env（例如端口、登录账号）
+# PORT=5000
+# HOST_PORT=17001
+# LOGIN_USERNAME=admin
+# LOGIN_PASSWORD=你的强密码
+# SECRET_KEY 可留空：首次启动会自动生成并写入 data/secret_key
+
 # 启动服务
-docker-compose up -d
+docker compose up -d --build
 
 # 查看定时任务启动日志（应出现“定时任务已启动”）
-docker-compose logs -f
+docker compose logs -f
 
 # 停止服务
-docker-compose down
+docker compose down
 ```
 
 ## 定时刷新说明
 
 - 应用在 `python web_outlook_app.py`、Docker、Docker Compose、Gunicorn 单 worker 模式下都会自动初始化定时任务。
-- 如需确认定时任务是否已启动，可执行 `docker-compose logs -f`，日志中应出现“定时任务已启动”。
+- 如需确认定时任务是否已启动，可执行 `docker compose logs -f`，日志中应出现“定时任务已启动”。
 - 若使用 Cron 模式，请确认已在系统设置中开启 `use_cron_schedule`，并填写正确的 5 段 Cron 表达式。
 
 ## 环境变量配置
 
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|
-| `SECRET_KEY` | Session 密钥（**必须设置**） | 无默认值，必须提供，请勿随意修改，数据库会基于这个加密，如果要改请先导出邮箱账号，改之后再重新导入账号 |
+| `SECRET_KEY` | Session 密钥（可选） | 留空时自动生成并持久化到 `SECRET_KEY_FILE` |
+| `SECRET_KEY_FILE` | SECRET_KEY 持久化文件路径 | `/app/data/secret_key`（Docker） / `data/secret_key`（本地） |
 | `LOGIN_USERNAME` | 登录用户名 | `admin` |
 | `LOGIN_PASSWORD` | 登录密码 | `admin123` |
+| `HOST_PORT` | 主机映射端口 | `5000` |
 | `FLASK_ENV` | 运行环境 | `production` |
 | `PORT` | 应用端口 | `5000` |
 | `HOST` | 监听地址 | `0.0.0.0` |
@@ -113,10 +106,7 @@ docker-compose down
 | `OAUTH_CLIENT_ID` | OAuth 客户端 ID | `建议使用自己的，如果实在搞不到不填的话会使用默认的` |
 | `OAUTH_REDIRECT_URI` | OAuth 重定向 URI | `建议使用自己的，如果实在搞不到不填的话会使用默认的` |
 
-**生成 SECRET_KEY：**
-```bash
-python -c 'import secrets; print(secrets.token_hex(32))'
-```
+> 安全建议：若你手动设置 `SECRET_KEY`，请使用至少 32 字符的随机字符串，且不要在后续随意更改。
 
 ## 数据持久化
 
@@ -132,11 +122,18 @@ python -c 'import secrets; print(secrets.token_hex(32))'
 
 ## 端口映射
 
-默认映射 5000 端口，可以在 `docker-compose.yml` 中修改：
+默认映射 `5000 -> 5000`，可通过 `.env` 覆盖主机端口：
+
+```env
+HOST_PORT=17001
+PORT=5000
+```
+
+也可以直接在 `docker-compose.yml` 中修改：
 
 ```yaml
 ports:
-  - "8080:5000"  # 将容器的 5000 端口映射到主机的 8080 端口
+  - "17001:5000"  # 将容器 5000 映射到主机 17001
 ```
 
 ## 镜像说明
@@ -154,8 +151,8 @@ ports:
 
 ```bash
 docker pull ghcr.io/assast/outlookemail:latest
-docker-compose down
-docker-compose up -d
+docker compose down
+docker compose up -d
 ```
 
 ### 自己构建镜像（可选）
@@ -164,7 +161,7 @@ docker-compose up -d
 docker build -t outlook-mail-reader .
 docker run -d \
   --name outlook-mail-reader \
-  -p 5000:5000 \
+  -p 17001:5000 \
   -v $(pwd)/data:/app/data \
   -e LOGIN_USERNAME=admin \
   -e LOGIN_PASSWORD=admin123 \

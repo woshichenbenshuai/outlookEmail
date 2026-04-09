@@ -9,7 +9,9 @@
 environment:
   - LOGIN_USERNAME=admin
   - LOGIN_PASSWORD=your_secure_password_here
-  - SECRET_KEY=your-random-secret-key-here
+  # 可选：留空时自动生成并持久化到 SECRET_KEY_FILE
+  - SECRET_KEY=
+  - SECRET_KEY_FILE=/app/data/secret_key
 ```
 
 **方式二：通过 Web 界面**
@@ -55,7 +57,8 @@ pip install flask-wtf>=1.2.0
 - 100,000 次迭代，SHA256 算法
 
 **重要提示：**
-- SECRET_KEY 必须设置且保持不变
+- SECRET_KEY 可以不手动设置（系统会自动生成并持久化）
+- 但一旦生成后必须保持不变（自动持久化文件不要删）
 - 更改 SECRET_KEY 会导致无法解密已存储的数据
 - 如需更改，请先导出账号，更改后重新导入
 
@@ -119,8 +122,8 @@ location / {
 ## 9. 使用强密码
 
 - 登录密码至少 8 位，包含大小写字母、数字和特殊字符
-- **SECRET_KEY 必须设置**，使用随机生成的长字符串（至少 32 字节）
-- 生成方法：`python -c 'import secrets; print(secrets.token_hex(32))'`
+- `SECRET_KEY` 建议使用随机长字符串（至少 32 字节）
+- 不手动设置时，系统会在首次启动时自动生成强随机密钥并写入 `SECRET_KEY_FILE`
 - 定期更换密码
 
 ## 10. 数据备份
@@ -135,7 +138,7 @@ cp data/outlook_accounts.db data/outlook_accounts.db.backup
 
 ## 安全最佳实践
 
-1. **必须设置 SECRET_KEY**：使用随机生成的强密钥
+1. **保护 SECRET_KEY 持久化文件**：不要泄露、不要随意删除/替换
 2. **启用 HTTPS**：生产环境使用 SSL/TLS 加密
 3. **定期更新**：及时更新到最新版本
 4. **监控日志**：定期查看审计日志和应用日志

@@ -50,15 +50,85 @@ try:
 except ImportError:
     socks = None
 
+WEAK_SECRET_KEY_VALUES = {
+    "your-secret-key-here",
+    "secret",
+    "123",
+    "123456",
+    "admin",
+    "password",
+    "changeme",
+}
+
+
+def is_weak_secret_key(value: str) -> bool:
+    normalized = str(value or '').strip()
+    if not normalized:
+        return True
+    if normalized.lower() in WEAK_SECRET_KEY_VALUES:
+        return True
+    return len(normalized) < 32
+
+
+def get_secret_key_file_path() -> str:
+    file_path = str(os.getenv("SECRET_KEY_FILE", "") or "").strip()
+    if file_path:
+        return file_path
+    database_path = str(os.getenv("DATABASE_PATH", "data/outlook_accounts.db") or "data/outlook_accounts.db")
+    data_dir = os.path.dirname(database_path) or "data"
+    return os.path.join(data_dir, "secret_key")
+
+
+def resolve_secret_key() -> str:
+    env_secret_key = str(os.getenv("SECRET_KEY", "") or "").strip()
+    if env_secret_key:
+        if is_weak_secret_key(env_secret_key):
+            raise RuntimeError(
+                "Detected weak SECRET_KEY from environment. "
+                "Use at least 32 characters (recommended: secrets.token_hex(32))."
+            )
+        return env_secret_key
+
+    key_file = get_secret_key_file_path()
+    key_dir = os.path.dirname(key_file)
+    if key_dir:
+        os.makedirs(key_dir, exist_ok=True)
+
+    if os.path.exists(key_file):
+        try:
+            with open(key_file, 'r', encoding='utf-8') as f:
+                stored_key = f.read().strip()
+        except Exception as exc:
+            raise RuntimeError(f"Failed to read SECRET_KEY_FILE: {key_file}. {str(exc)}") from exc
+
+        if is_weak_secret_key(stored_key):
+            raise RuntimeError(
+                f"Detected weak SECRET_KEY in file: {key_file}. "
+                "Please replace it with a strong key (recommended: secrets.token_hex(32))."
+            )
+        return stored_key
+
+    generated_key = secrets.token_hex(32)
+    try:
+        with open(key_file, 'w', encoding='utf-8') as f:
+            f.write(generated_key)
+        try:
+            os.chmod(key_file, 0o600)
+        except Exception:
+            pass
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to persist generated SECRET_KEY to {key_file}. "
+            "Set SECRET_KEY or SECRET_KEY_FILE manually."
+        ) from exc
+
+    print(f"[SECURITY] SECRET_KEY not provided. Generated and persisted to {key_file}")
+    return generated_key
+
+
+APP_SECRET_KEY = resolve_secret_key()
 app = Flask(__name__)
-# 强制从环境变量读取 secret_key，不提供默认值以防止安全漏洞
-secret_key = os.getenv("SECRET_KEY")
-if not secret_key:
-    raise RuntimeError(
-        "SECRET_KEY environment variable is required. "
-        "Generate one with: python -c 'import secrets; print(secrets.token_hex(32))'"
-    )
-app.secret_key = secret_key
+app.secret_key = APP_SECRET_KEY
 # 设置 session 过期时间（默认 7 天）
 app.config['PERMANENT_SESSION_LIFETIME'] = 60 * 60 * 24 * 7  # 7 天
 
@@ -533,7 +603,7 @@ def get_encryption_key() -> bytes:
     从 SECRET_KEY 派生加密密钥
     使用 PBKDF2 从 SECRET_KEY 派生 32 字节密钥
     """
-    secret_key = os.getenv("SECRET_KEY")
+    secret_key = APP_SECRET_KEY
     if not secret_key:
         raise RuntimeError("SECRET_KEY is required for encryption")
 

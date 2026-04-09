@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 
-os.environ.setdefault('SECRET_KEY', 'test-secret-key')
+os.environ.setdefault('SECRET_KEY', '0123456789abcdef0123456789abcdef')
 _temp_dir = tempfile.mkdtemp(prefix='outlookEmail-tests-')
 os.environ['DATABASE_PATH'] = os.path.join(_temp_dir, 'test.db')
 
