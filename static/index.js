@@ -5521,6 +5521,70 @@ ${details}
             updateBatchActionBar();
         }
 
+        async function confirmBatchDeleteAccounts() {
+            const checked = document.querySelectorAll('.account-select-checkbox:checked');
+            const accountIds = Array.from(checked)
+                .map(cb => parseInt(cb.value, 10))
+                .filter(id => Number.isInteger(id) && id > 0);
+
+            if (accountIds.length === 0) {
+                showToast('请先选择要删除的账号', 'error');
+                return;
+            }
+
+            const currentActiveCheckbox = document.querySelector('.account-item.active .account-select-checkbox');
+            const willDeleteCurrent = currentActiveCheckbox
+                ? accountIds.includes(parseInt(currentActiveCheckbox.value, 10))
+                : false;
+
+            if (!confirm(`确定要删除选中的 ${accountIds.length} 个账号吗？\n此操作不可恢复。`)) {
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/accounts/batch-delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ account_ids: accountIds })
+                });
+
+                const data = await response.json();
+                if (data.success) {
+                    showToast(data.message || `已删除 ${accountIds.length} 个账号`, 'success');
+
+                    // 批量删除后清空账号缓存，避免跨分组/搜索视图残留旧数据
+                    accountsCache = {};
+
+                    if (willDeleteCurrent) {
+                        currentAccount = null;
+                        document.getElementById('currentAccount').classList.remove('show');
+                        document.getElementById('emailList').innerHTML = `
+                            <div class="empty-state">
+                                <div class="empty-state-icon">📬</div>
+                                <div class="empty-state-text">请从左侧选择一个邮箱账号</div>
+                            </div>
+                        `;
+                        document.getElementById('emailDetail').innerHTML = `
+                            <div class="empty-state">
+                                <div class="empty-state-icon">📄</div>
+                                <div class="empty-state-text">选择一封邮件查看详情</div>
+                            </div>
+                        `;
+                    }
+
+                    clearAccountSelection();
+                    loadGroups();
+                    if (currentGroupId) {
+                        loadAccountsByGroup(currentGroupId, true);
+                    }
+                } else {
+                    handleApiError(data, '批量删除失败');
+                }
+            } catch (error) {
+                showToast('批量删除失败', 'error');
+            }
+        }
+
         let batchActionType = ''; // 'add' or 'remove'
 
         // 显示批量打标模态框

@@ -3885,6 +3885,65 @@ def api_batch_update_account_group():
         return jsonify({'success': False, 'error': str(e)})
 
 
+@app.route('/api/accounts/batch-delete', methods=['POST'])
+@login_required
+def api_batch_delete_accounts():
+    """批量删除账号"""
+    data = request.json or {}
+    raw_account_ids = data.get('account_ids', [])
+
+    if not isinstance(raw_account_ids, list) or not raw_account_ids:
+        return jsonify({'success': False, 'error': '请选择要删除的账号'})
+
+    account_ids = []
+    for raw_id in raw_account_ids:
+        try:
+            account_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if account_id > 0 and account_id not in account_ids:
+            account_ids.append(account_id)
+
+    if not account_ids:
+        return jsonify({'success': False, 'error': '账号参数无效'})
+
+    db = get_db()
+    try:
+        placeholders = ','.join('?' * len(account_ids))
+        existing_rows = db.execute(
+            f'SELECT id, email FROM accounts WHERE id IN ({placeholders})',
+            account_ids
+        ).fetchall()
+
+        if not existing_rows:
+            return jsonify({'success': False, 'error': '未找到可删除的账号'})
+
+        existing_ids = [int(row['id']) for row in existing_rows]
+        delete_placeholders = ','.join('?' * len(existing_ids))
+        cursor = db.execute(
+            f'DELETE FROM accounts WHERE id IN ({delete_placeholders})',
+            existing_ids
+        )
+        db.commit()
+
+        deleted_count = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else len(existing_ids)
+
+        preview_emails = [str(row['email']) for row in existing_rows[:5]]
+        details = ', '.join(preview_emails)
+        if len(existing_rows) > 5:
+            details += f' 等 {len(existing_rows)} 个账号'
+        log_audit('batch_delete', 'account', ','.join(map(str, existing_ids)), details)
+
+        return jsonify({
+            'success': True,
+            'deleted_count': deleted_count,
+            'message': f'已删除 {deleted_count} 个账号'
+        })
+    except Exception as exc:
+        db.rollback()
+        return jsonify({'success': False, 'error': f'批量删除失败: {str(exc)}'})
+
+
 
 @app.route('/api/accounts/search', methods=['GET'])
 @login_required
