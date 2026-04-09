@@ -3924,6 +3924,10 @@ ${details}
                 const data = await response.json();
 
                 if (data.success) {
+                    const settingsUsernameInput = document.getElementById('settingsUsername');
+                    if (settingsUsernameInput) {
+                        settingsUsernameInput.value = data.settings.login_username || 'admin';
+                    }
                     // 密码不显示，只显示 API Key
                     document.getElementById('settingsApiKey').value = data.settings.gptmail_api_key || '';
                     document.getElementById('settingsExternalApiKey').value = data.settings.external_api_key || '';
@@ -4019,6 +4023,8 @@ ${details}
 
         // 保存设置
         async function saveSettings() {
+            const loginUsernameInput = document.getElementById('settingsUsername');
+            const loginUsername = loginUsernameInput ? loginUsernameInput.value.trim() : '';
             const password = document.getElementById('settingsPassword').value;
             const apiKey = document.getElementById('settingsApiKey').value.trim();
             const externalApiKey = document.getElementById('settingsExternalApiKey').value.trim();
@@ -4029,6 +4035,16 @@ ${details}
             const enableScheduled = document.getElementById('enableScheduledRefresh').checked;
 
             const settings = {};
+
+            if (!loginUsername) {
+                showToast('登录用户名不能为空', 'error');
+                return;
+            }
+            if (loginUsername.length < 3) {
+                showToast('登录用户名至少 3 位', 'error');
+                return;
+            }
+            settings.login_username = loginUsername;
 
             // 只有输入了密码才更新密码
             if (password) {
@@ -4303,6 +4319,10 @@ ${details}
                 const data = await response.json();
 
                 if (data.success) {
+                    const settingsUsernameInput = document.getElementById('settingsUsername');
+                    if (settingsUsernameInput) {
+                        settingsUsernameInput.value = data.settings.login_username || 'admin';
+                    }
                     document.getElementById('settingsApiKey').value = data.settings.gptmail_api_key || '';
                     document.getElementById('settingsExternalApiKey').value = data.settings.external_api_key || '';
                     document.getElementById('settingsDuckmailBaseUrl').value = data.settings.duckmail_base_url || '';
@@ -4345,6 +4365,8 @@ ${details}
 
         async function saveSettings() {
             ensureForwardingSettingsUI();
+            const loginUsernameInput = document.getElementById('settingsUsername');
+            const loginUsername = loginUsernameInput ? loginUsernameInput.value.trim() : '';
             const password = document.getElementById('settingsPassword').value;
             const apiKey = document.getElementById('settingsApiKey').value.trim();
             const externalApiKey = document.getElementById('settingsExternalApiKey').value.trim();
@@ -4355,6 +4377,16 @@ ${details}
             const enableScheduled = document.getElementById('enableScheduledRefresh').checked;
             const settings = {};
             const forwardChannels = getSelectedForwardChannels();
+
+            if (!loginUsername) {
+                showToast('登录用户名不能为空', 'error');
+                return;
+            }
+            if (loginUsername.length < 3) {
+                showToast('登录用户名至少 3 位', 'error');
+                return;
+            }
+            settings.login_username = loginUsername;
 
             if (password) {
                 settings.login_password = password;

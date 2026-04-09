@@ -98,7 +98,8 @@ else:
     def csrf_exempt(f):
         return f
 
-# 登录密码配置（可以修改为你想要的密码）
+# 登录账号配置（可以修改为你想要的用户名和密码）
+LOGIN_USERNAME = os.getenv("LOGIN_USERNAME", "admin")
 LOGIN_PASSWORD = os.getenv("LOGIN_PASSWORD", "admin123")
 
 # ==================== 配置 ====================
@@ -946,6 +947,22 @@ def init_db():
             )
     
     # 初始化默认设置
+    # 检查是否已有用户名设置
+    cursor.execute("SELECT value FROM settings WHERE key = 'login_username'")
+    existing_username = cursor.fetchone()
+
+    if existing_username:
+        username_value = str(existing_username[0] or '').strip()
+        if not username_value:
+            cursor.execute('''
+                UPDATE settings SET value = ? WHERE key = 'login_username'
+            ''', (LOGIN_USERNAME,))
+    else:
+        cursor.execute('''
+            INSERT INTO settings (key, value)
+            VALUES ('login_username', ?)
+        ''', (LOGIN_USERNAME,))
+
     # 检查是否已有密码设置
     cursor.execute("SELECT value FROM settings WHERE key = 'login_password'")
     existing_password = cursor.fetchone()
@@ -1257,6 +1274,13 @@ def get_login_password() -> str:
     """获取登录密码（优先从数据库读取）"""
     password = get_setting('login_password')
     return password if password else LOGIN_PASSWORD
+
+
+def get_login_username() -> str:
+    """获取登录用户名（优先从数据库读取）"""
+    username = get_setting('login_username')
+    normalized = str(username or '').strip()
+    return normalized if normalized else LOGIN_USERNAME
 
 
 def get_gptmail_api_key() -> str:
@@ -3164,23 +3188,30 @@ def login():
                 }), 429
 
             data = request.json if request.is_json else request.form
+            username = str(data.get('username', '')).strip()
             password = data.get('password', '')
+            if not username or not password:
+                return jsonify({'success': False, 'error': '用户名和密码不能为空'})
 
+            # 从数据库获取用户名与密码哈希
+            stored_username = get_login_username()
             # 从数据库获取密码哈希
             stored_password = get_login_password()
 
-            # 验证密码
-            if verify_password(password, stored_password):
+            # 验证用户名和密码
+            username_match = secrets.compare_digest(username, stored_username)
+            if username_match and verify_password(password, stored_password):
                 # 登录成功，重置失败记录
                 reset_login_attempts(client_ip)
                 session['logged_in'] = True
+                session['login_username'] = stored_username
                 session.permanent = True
                 session.modified = True  # 确保 Flask-Session 保存 session
                 return jsonify({'success': True, 'message': '登录成功'})
             else:
                 # 登录失败，记录失败次数
                 record_login_failure(client_ip)
-                return jsonify({'success': False, 'error': '密码错误'})
+                return jsonify({'success': False, 'error': '用户名或密码错误'})
         except Exception as e:
             print(f"Login error: {e}")
             import traceback
@@ -3195,6 +3226,7 @@ def login():
 def logout():
     """退出登录"""
     session.pop('logged_in', None)
+    session.pop('login_username', None)
     return redirect(url_for('login'))
 
 
@@ -6573,6 +6605,7 @@ def api_validate_cron():
 def api_get_settings():
     """获取所有设置"""
     settings = get_all_settings()
+    settings['login_username'] = get_login_username()
     # 隐藏密码的部分字符
     if 'login_password' in settings:
         pwd = settings['login_password']
@@ -6613,6 +6646,22 @@ def api_update_settings():
     data = request.json
     updated = []
     errors = []
+
+    # 更新登录用户名
+    if 'login_username' in data:
+        new_username = str(data['login_username']).strip()
+        if not new_username:
+            errors.append('用户名不能为空')
+        elif len(new_username) < 3:
+            errors.append('用户名长度至少为 3 位')
+        elif len(new_username) > 64:
+            errors.append('用户名长度不能超过 64 位')
+        elif any(char.isspace() for char in new_username):
+            errors.append('用户名不能包含空白字符')
+        elif set_setting('login_username', new_username):
+            updated.append('登录用户名')
+        else:
+            errors.append('更新登录用户名失败')
 
     # 更新登录密码
     if 'login_password' in data:

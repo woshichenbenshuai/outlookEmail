@@ -136,15 +136,19 @@
                 </svg>
             </div>
             <h1 class="login-title">Outlook 邮件管理</h1>
-            <p class="login-subtitle">请输入密码登录系统</p>
+            <p class="login-subtitle">请输入用户名和密码登录系统</p>
         </div>
         
         <div class="error-message" id="errorMessage"></div>
         
         <form id="loginForm" onsubmit="handleLogin(event)">
             <div class="form-group">
+                <label class="form-label" for="username">登录用户名</label>
+                <input type="text" class="form-input" id="username" placeholder="请输入用户名" autofocus required>
+            </div>
+            <div class="form-group">
                 <label class="form-label" for="password">登录密码</label>
-                <input type="password" class="form-input" id="password" placeholder="请输入密码" autofocus required>
+                <input type="password" class="form-input" id="password" placeholder="请输入密码" required>
             </div>
             <button type="submit" class="login-btn" id="loginBtn">登 录</button>
         </form>
@@ -154,12 +158,13 @@
         async function handleLogin(event) {
             event.preventDefault();
             
+            const username = document.getElementById('username').value.trim();
             const password = document.getElementById('password').value;
             const loginBtn = document.getElementById('loginBtn');
             const errorMessage = document.getElementById('errorMessage');
             
-            if (!password) {
-                errorMessage.textContent = '请输入密码';
+            if (!username || !password) {
+                errorMessage.textContent = '请输入用户名和密码';
                 errorMessage.classList.add('show');
                 return;
             }
@@ -172,7 +177,7 @@
                 const response = await fetch('/login', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ password })
+                    body: JSON.stringify({ username, password })
                 });
                 
                 const data = await response.json();
@@ -193,11 +198,15 @@
             }
         }
         
-        // 回车键提交
-        document.getElementById('password').addEventListener('keypress', function(e) {
-            if (e.key === 'Enter') {
-                document.getElementById('loginForm').dispatchEvent(new Event('submit'));
-            }
+        // 回车键提交（对用户名、密码输入框均生效）
+        ['username', 'password'].forEach(function(fieldId) {
+            const input = document.getElementById(fieldId);
+            if (!input) return;
+            input.addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') {
+                    document.getElementById('loginForm').dispatchEvent(new Event('submit'));
+                }
+            });
         });
     </script>
 </body>

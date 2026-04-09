@@ -126,6 +126,7 @@ docker run -d \
   --name outlook-mail-reader \
   -p 5000:5000 \
   -v $(pwd)/data:/app/data \
+  -e LOGIN_USERNAME=admin \
   -e LOGIN_PASSWORD=admin123 \
   -e SECRET_KEY=your-secret-key-here \
   ghcr.io/assast/outlookemail:latest
@@ -156,6 +157,7 @@ services:
     volumes:
       - ./data:/app/data
     environment:
+      - LOGIN_USERNAME=admin
       - LOGIN_PASSWORD=admin123
       - SECRET_KEY=your-secret-key-here
       - FLASK_ENV=production

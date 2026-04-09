@@ -13,6 +13,7 @@ docker run -d \
   --name outlook-mail-reader \
   -p 5000:5000 \
   -v $(pwd)/data:/app/data \
+  -e LOGIN_USERNAME=admin \
   -e LOGIN_PASSWORD=admin123 \
   -e SECRET_KEY=your-secret-key-here \
   ghcr.io/assast/outlookemail:latest
@@ -66,6 +67,7 @@ services:
     volumes:
       - ./data:/app/data
     environment:
+      - LOGIN_USERNAME=admin
       - LOGIN_PASSWORD=admin123
       - SECRET_KEY=your-secret-key-here
       - FLASK_ENV=production
@@ -95,6 +97,7 @@ docker-compose down
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|
 | `SECRET_KEY` | Session 密钥（**必须设置**） | 无默认值，必须提供，请勿随意修改，数据库会基于这个加密，如果要改请先导出邮箱账号，改之后再重新导入账号 |
+| `LOGIN_USERNAME` | 登录用户名 | `admin` |
 | `LOGIN_PASSWORD` | 登录密码 | `admin123` |
 | `FLASK_ENV` | 运行环境 | `production` |
 | `PORT` | 应用端口 | `5000` |
@@ -163,6 +166,7 @@ docker run -d \
   --name outlook-mail-reader \
   -p 5000:5000 \
   -v $(pwd)/data:/app/data \
+  -e LOGIN_USERNAME=admin \
   -e LOGIN_PASSWORD=admin123 \
   outlook-mail-reader
 ```

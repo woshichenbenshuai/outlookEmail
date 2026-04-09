@@ -1,19 +1,20 @@
 # 🔐 安全配置
 
-## 1. 修改默认密码
+## 1. 修改默认登录账号
 
 **方式一：通过环境变量**
 
 在 `docker-compose.yml` 中：
 ```yaml
 environment:
+  - LOGIN_USERNAME=admin
   - LOGIN_PASSWORD=your_secure_password_here
   - SECRET_KEY=your-random-secret-key-here
 ```
 
 **方式二：通过 Web 界面**
 
-登录后点击「⚙️ 设置」按钮，在线修改登录密码。
+登录后点击「⚙️ 设置」按钮，在线修改登录用户名和登录密码。
 
 ## 2. 启用 CSRF 防护（推荐）
 
