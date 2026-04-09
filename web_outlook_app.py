@@ -33,6 +33,7 @@ from urllib.parse import quote, urlparse, unquote
 from flask import Flask, render_template, request, jsonify, g, session, redirect, url_for, Response, make_response
 from functools import wraps
 import requests
+from werkzeug.exceptions import HTTPException
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -1862,18 +1863,12 @@ def add_account(email_addr: str, password: str, client_id: str = '', refresh_tok
         # 加密敏感字段
         encrypted_password = encrypt_data(password) if password else password
         encrypted_refresh_token = encrypt_data(refresh_token) if refresh_token else refresh_token
-        encrypted_imap_password = encrypt_data(imap_password) if imap_password else imap_password
         provider_meta = get_provider_meta(provider, email_addr)
         provider = provider_meta['key']
         account_type = account_type or provider_meta.get('account_type', 'outlook')
         imap_host = imap_host or provider_meta.get('imap_host', '')
         imap_port = int(imap_port or provider_meta.get('imap_port', 993) or 993)
         encrypted_imap_password = encrypt_data(imap_password) if imap_password else imap_password
-        provider_meta = get_provider_meta(provider, email_addr)
-        provider = provider_meta['key']
-        account_type = account_type or provider_meta.get('account_type', 'outlook')
-        imap_host = imap_host or provider_meta.get('imap_host', '')
-        imap_port = int(imap_port or provider_meta.get('imap_port', 993) or 993)
 
         db.execute('''
             INSERT INTO accounts (
@@ -4148,86 +4143,22 @@ def api_add_account():
 @login_required
 def api_update_account(account_id):
     """更新账号"""
-    data = request.json
-
-    # 检查是否只更新状态
-    if 'status' in data and len(data) == 1:
-        # 只更新状态
-        return api_update_account_status(account_id, data['status'])
-
-    email_addr = data.get('email', '')
-    password = data.get('password', '')
-    client_id = data.get('client_id', '')
-    refresh_token = data.get('refresh_token', '')
-    account_type = data.get('account_type', 'outlook')
-    provider = data.get('provider', 'outlook')
-    imap_host = (data.get('imap_host', '') or '').strip()
-    imap_port = data.get('imap_port', 993)
-    imap_password = data.get('imap_password', '')
-    group_id = data.get('group_id', 1)
-    remark = sanitize_input(data.get('remark', ''), max_length=200)
-    status = data.get('status', 'active')
-    forward_enabled = bool(data.get('forward_enabled', False))
-    aliases_provided = 'aliases' in data
-    aliases = parse_alias_payload(data.get('aliases', [])) if aliases_provided else []
-
-    provider_meta = get_provider_meta(provider, email_addr)
-    is_outlook = (account_type == 'outlook') or provider_meta['key'] == 'outlook'
-    if is_outlook:
-        if not email_addr or not client_id or not refresh_token:
-            return jsonify({'success': False, 'error': '邮箱、Client ID 和 Refresh Token 不能为空'})
-        account_type = 'outlook'
-        provider = 'outlook'
-        imap_host = IMAP_SERVER_NEW
-        imap_port = IMAP_PORT
-        imap_password = ''
-    else:
-        if not email_addr or not imap_password:
-            return jsonify({'success': False, 'error': '邮箱和 IMAP 密码不能为空'})
-        if provider_meta['key'] == 'custom' and not imap_host:
-            return jsonify({'success': False, 'error': '自定义 IMAP 必须填写服务器地址'})
-        client_id = ''
-        refresh_token = ''
-        account_type = 'imap'
-        provider = provider_meta['key']
-        if provider != 'custom':
-            imap_host = provider_meta.get('imap_host', '')
-            imap_port = provider_meta.get('imap_port', 993)
-
-    if False:
-        return jsonify({'success': False, 'error': '邮箱、Client ID 和 Refresh Token 不能为空'})
-
-    if aliases_provided:
-        _, alias_errors = validate_account_aliases(account_id, email_addr, aliases)
-        if alias_errors:
-            return jsonify({'success': False, 'error': '；'.join(alias_errors), 'errors': alias_errors})
-
-    if update_account(
-        account_id, email_addr, password, client_id, refresh_token, group_id, remark, status,
-        account_type, provider, imap_host, imap_port, imap_password, forward_enabled
-    ):
-        cleaned_aliases = get_account_aliases(account_id)
-        if aliases_provided:
-            db = get_db()
-            alias_success, cleaned_aliases, alias_errors = replace_account_aliases(account_id, email_addr, aliases, db)
-            if not alias_success:
-                db.rollback()
-                return jsonify({'success': False, 'error': '；'.join(alias_errors), 'errors': alias_errors})
-            db.commit()
-        return jsonify({'success': True, 'message': '账号更新成功', 'aliases': cleaned_aliases})
-    else:
-        return jsonify({'success': False, 'error': '更新失败'})
+    return api_update_account_v2(account_id)
 
 
 def api_update_account_status(account_id: int, status: str):
     """只更新账号状态"""
+    normalized_status = str(status or '').strip().lower()
+    if normalized_status not in ('active', 'inactive'):
+        return jsonify({'success': False, 'error': '状态参数无效，仅支持 active / inactive'}), 400
+
     db = get_db()
     try:
         db.execute('''
             UPDATE accounts
             SET status = ?, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
-        ''', (status, account_id))
+        ''', (normalized_status, account_id))
         db.commit()
         return jsonify({'success': True, 'message': '状态更新成功'})
     except Exception:
@@ -5103,6 +5034,24 @@ def normalize_folder_name(folder: str) -> str:
     return value or 'inbox'
 
 
+def get_int_query_arg(name: str, default: int, minimum: Optional[int] = None,
+                      maximum: Optional[int] = None) -> int:
+    raw_value = request.args.get(name, None)
+    if raw_value in (None, ''):
+        value = default
+    else:
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            raise ValueError(f'{name} 参数必须是整数')
+
+    if minimum is not None and value < minimum:
+        raise ValueError(f'{name} 参数不能小于 {minimum}')
+    if maximum is not None and value > maximum:
+        raise ValueError(f'{name} 参数不能大于 {maximum}')
+    return value
+
+
 def get_query_arg_preserve_plus(name: str, default: str = '') -> str:
     raw_query = request.query_string.decode('utf-8', errors='ignore')
     if raw_query:
@@ -5305,34 +5254,7 @@ def fetch_account_emails(account: Dict[str, Any], folder: str, skip: int, top: i
 @login_required
 def api_get_emails(email_addr):
     """获取邮件列表（支持分页，不使用缓存）"""
-    account = get_account_by_email(email_addr)
-
-    if not account:
-        error_payload = build_error_payload(
-            "ACCOUNT_NOT_FOUND",
-            "账号不存在",
-            "NotFoundError",
-            404,
-            f"email={email_addr}"
-        )
-        return jsonify({'success': False, 'error': error_payload})
-
-    folder = normalize_folder_name(request.args.get('folder', 'inbox'))
-    skip = int(request.args.get('skip', 0))
-    top = int(request.args.get('top', 20))
-    result = fetch_account_emails(account, folder, skip, top)
-    if result.get('success'):
-        db = get_db()
-        db.execute(
-            '''
-            UPDATE accounts
-            SET last_refresh_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-            ''',
-            (account['id'],)
-        )
-        db.commit()
-    return jsonify(result)
+    return api_get_emails_v2(email_addr)
 
 @app.route('/api/emails/delete', methods=['POST'])
 @login_required
@@ -6733,38 +6655,39 @@ def api_validate_cron():
 @login_required
 def api_get_settings():
     """获取所有设置"""
-    settings = get_all_settings()
-    settings['login_username'] = get_login_username()
-    # 隐藏密码的部分字符
-    if 'login_password' in settings:
-        pwd = settings['login_password']
-        if len(pwd) > 2:
-            settings['login_password_masked'] = pwd[0] + '*' * (len(pwd) - 2) + pwd[-1]
-        else:
-            settings['login_password_masked'] = '*' * len(pwd)
-    # 返回解密后的对外 API Key
-    settings['external_api_key'] = get_external_api_key()
-    # 返回 DuckMail 设置
-    settings['duckmail_base_url'] = get_duckmail_base_url()
-    settings['duckmail_api_key'] = get_duckmail_api_key()
-    settings['cloudflare_worker_domain'] = get_cloudflare_worker_domain()
-    settings['cloudflare_email_domains'] = ', '.join(get_cloudflare_email_domains())
-    settings['cloudflare_admin_password'] = get_cloudflare_admin_password()
-    settings['forward_channels'] = get_forward_channels()
-    settings['forward_check_interval_minutes'] = get_setting('forward_check_interval_minutes', '5')
-    settings['forward_email_window_minutes'] = get_setting('forward_email_window_minutes', '0')
-    settings['forward_include_junkemail'] = get_setting('forward_include_junkemail', 'false')
-    settings['email_forward_recipient'] = get_setting('email_forward_recipient', '')
-    settings['smtp_host'] = get_setting('smtp_host', '')
-    settings['smtp_port'] = get_setting('smtp_port', '465')
-    settings['smtp_username'] = get_setting('smtp_username', '')
-    settings['smtp_password'] = get_setting_decrypted('smtp_password', '')
-    settings['smtp_from_email'] = get_setting('smtp_from_email', '')
-    settings['smtp_provider'] = normalize_smtp_forward_provider(get_setting('smtp_provider', 'custom'))
-    settings['smtp_use_tls'] = get_setting('smtp_use_tls', 'false')
-    settings['smtp_use_ssl'] = get_setting('smtp_use_ssl', 'true')
-    settings['telegram_bot_token'] = get_setting_decrypted('telegram_bot_token', '')
-    settings['telegram_chat_id'] = get_setting('telegram_chat_id', '')
+    login_password = get_setting('login_password', '')
+    settings = {
+        'login_username': get_login_username(),
+        # 仅回传是否已设置，避免暴露哈希内容
+        'login_password_masked': '******' if login_password else '',
+        'gptmail_api_key': get_gptmail_api_key(),
+        'external_api_key': get_external_api_key(),
+        'duckmail_base_url': get_duckmail_base_url(),
+        'duckmail_api_key': get_duckmail_api_key(),
+        'cloudflare_worker_domain': get_cloudflare_worker_domain(),
+        'cloudflare_email_domains': ', '.join(get_cloudflare_email_domains()),
+        'cloudflare_admin_password': get_cloudflare_admin_password(),
+        'refresh_interval_days': get_setting('refresh_interval_days', '30'),
+        'refresh_delay_seconds': get_setting('refresh_delay_seconds', '5'),
+        'refresh_cron': get_setting('refresh_cron', '0 2 * * *'),
+        'use_cron_schedule': get_setting('use_cron_schedule', 'false'),
+        'enable_scheduled_refresh': get_setting('enable_scheduled_refresh', 'true'),
+        'forward_channels': get_forward_channels(),
+        'forward_check_interval_minutes': get_setting('forward_check_interval_minutes', '5'),
+        'forward_email_window_minutes': get_setting('forward_email_window_minutes', '0'),
+        'forward_include_junkemail': get_setting('forward_include_junkemail', 'false'),
+        'email_forward_recipient': get_setting('email_forward_recipient', ''),
+        'smtp_host': get_setting('smtp_host', ''),
+        'smtp_port': get_setting('smtp_port', '465'),
+        'smtp_username': get_setting('smtp_username', ''),
+        'smtp_password': get_setting_decrypted('smtp_password', ''),
+        'smtp_from_email': get_setting('smtp_from_email', ''),
+        'smtp_provider': normalize_smtp_forward_provider(get_setting('smtp_provider', 'custom')),
+        'smtp_use_tls': get_setting('smtp_use_tls', 'false'),
+        'smtp_use_ssl': get_setting('smtp_use_ssl', 'true'),
+        'telegram_bot_token': get_setting_decrypted('telegram_bot_token', ''),
+        'telegram_chat_id': get_setting('telegram_chat_id', ''),
+    }
     return jsonify({'success': True, 'settings': settings})
 
 
@@ -7061,95 +6984,7 @@ def api_update_settings():
 @api_key_required
 def api_external_get_emails():
     """对外 API：通过 API Key 获取邮件列表"""
-    email_addr = request.args.get('email', '').strip()
-    folder = request.args.get('folder', 'inbox').strip().lower()
-    skip = int(request.args.get('skip', 0))
-    top = int(request.args.get('top', 20))
-
-    if not email_addr:
-        return jsonify({'success': False, 'error': '缺少 email 参数'}), 400
-
-    # 验证 folder 参数
-    valid_folders = ['inbox', 'junkemail']
-    if folder not in valid_folders:
-        return jsonify({'success': False, 'error': f'folder 参数无效，支持: {", ".join(valid_folders)}'}), 400
-
-    # 限制分页大小
-    if top > 50:
-        top = 50
-
-    account = get_account_by_email(email_addr)
-    if not account:
-        return jsonify({'success': False, 'error': '邮箱账号不存在'}), 404
-
-    # 获取分组代理设置
-    proxy_url = ''
-    if account.get('group_id'):
-        group = get_group_by_id(account['group_id'])
-        if group:
-            proxy_url = group.get('proxy_url', '') or ''
-
-    # 收集所有错误信息
-    all_errors = {}
-
-    # 1. 尝试 Graph API
-    graph_result = get_emails_graph(account['client_id'], account['refresh_token'], folder, skip, top, proxy_url)
-    if graph_result.get('success'):
-        emails = graph_result.get('emails', [])
-        formatted = []
-        for e in emails:
-            formatted.append({
-                'id': e.get('id'),
-                'subject': e.get('subject', '无主题'),
-                'from': e.get('from', {}).get('emailAddress', {}).get('address', '未知'),
-                'date': e.get('receivedDateTime', ''),
-                'is_read': e.get('isRead', False),
-                'has_attachments': e.get('hasAttachments', False),
-                'body_preview': e.get('bodyPreview', '')
-            })
-        return jsonify({
-            'success': True,
-            'emails': formatted,
-            'method': 'Graph API',
-            'has_more': len(formatted) >= top
-        })
-    else:
-        graph_error = graph_result.get('error')
-        all_errors['graph'] = graph_error
-        if isinstance(graph_error, dict) and graph_error.get('type') in ('ProxyError', 'ConnectionError'):
-            return jsonify({'success': False, 'error': '代理连接失败', 'details': all_errors})
-
-    # 2. 尝试新版 IMAP
-    imap_new_result = get_emails_imap_with_server(
-        account['email'], account['client_id'], account['refresh_token'],
-        folder, skip, top, IMAP_SERVER_NEW
-    )
-    if imap_new_result.get('success'):
-        return jsonify({
-            'success': True,
-            'emails': imap_new_result.get('emails', []),
-            'method': 'IMAP (New)',
-            'has_more': False
-        })
-    else:
-        all_errors['imap_new'] = imap_new_result.get('error')
-
-    # 3. 尝试旧版 IMAP
-    imap_old_result = get_emails_imap_with_server(
-        account['email'], account['client_id'], account['refresh_token'],
-        folder, skip, top, IMAP_SERVER_OLD
-    )
-    if imap_old_result.get('success'):
-        return jsonify({
-            'success': True,
-            'emails': imap_old_result.get('emails', []),
-            'method': 'IMAP (Old)',
-            'has_more': False
-        })
-    else:
-        all_errors['imap_old'] = imap_old_result.get('error')
-
-    return jsonify({'success': False, 'error': '无法获取邮件，所有方式均失败', 'details': all_errors})
+    return api_external_get_emails_v2()
 
 
 # ==================== 定时任务调度器 ====================
@@ -7709,7 +7544,7 @@ def init_scheduler():
                 enable_scheduled = get_setting('enable_scheduled_refresh', 'true').lower() == 'true'
 
                 if not enable_scheduled:
-                    print("✓ 定时刷新已禁用")
+                    print("[scheduler] scheduled refresh disabled")
                     return None
 
                 use_cron = get_setting('use_cron_schedule', 'false').lower() == 'true'
@@ -7748,13 +7583,13 @@ def init_scheduler():
                             )
                             scheduler.start()
                             scheduler_instance = scheduler
-                            print(f"✓ 定时任务已启动：Cron 表达式 '{cron_expr}'")
+                            print(f"[scheduler] started with cron expression '{cron_expr}'")
                             atexit.register(lambda: scheduler.shutdown())
                             return scheduler_instance
                         else:
-                            print(f"⚠ Cron 表达式格式错误，回退到默认配置")
+                            print("[scheduler] invalid cron expression format, fallback to default schedule")
                     except Exception as e:
-                        print(f"⚠ Cron 表达式解析失败: {str(e)}，回退到默认配置")
+                        print(f"[scheduler] cron parse failed: {str(e)}; fallback to default schedule")
 
                 refresh_interval_days = int(get_setting('refresh_interval_days', '30'))
                 scheduler.add_job(
@@ -7775,22 +7610,24 @@ def init_scheduler():
                 )
                 scheduler.start()
                 scheduler_instance = scheduler
-                print(f"✓ 定时任务已启动：每天凌晨 2:00 检查刷新（周期：{refresh_interval_days} 天）")
+                print(f"[scheduler] started with daily 02:00 schedule (interval={refresh_interval_days} days)")
 
             atexit.register(lambda: scheduler.shutdown())
 
             return scheduler_instance
         except ImportError:
-            print("⚠ APScheduler 未安装，定时任务功能不可用")
-            print("  安装命令：pip install APScheduler>=3.10.0")
+            print("[scheduler] APScheduler not installed; scheduler disabled")
+            print("Install with: pip install APScheduler>=3.10.0")
             return None
         except Exception as e:
-            print(f"⚠ 定时任务初始化失败：{str(e)}")
+            print(f"[scheduler] initialization failed: {str(e)}")
             return None
 
 
 def ensure_scheduler_started():
     """确保调度器已启动（兼容 gunicorn / docker compose）"""
+    if str(os.getenv('DISABLE_SCHEDULER', '')).strip().lower() in {'1', 'true', 'yes', 'on'}:
+        return None
     if os.getenv('WERKZEUG_RUN_MAIN') == 'false':
         return None
     return init_scheduler()
@@ -8032,8 +7869,12 @@ def api_get_emails_v2(email_addr):
         return jsonify({'success': False, 'error': error_payload})
 
     folder = normalize_folder_name(request.args.get('folder', 'inbox'))
-    skip = int(request.args.get('skip', 0))
-    top = int(request.args.get('top', 20))
+    try:
+        skip = get_int_query_arg('skip', 0, minimum=0)
+        top = get_int_query_arg('top', 20, minimum=1, maximum=50)
+    except ValueError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+
     subject_contains = request.args.get('subject_contains', '').strip().lower()
     from_contains = request.args.get('from_contains', '').strip().lower()
     keyword = request.args.get('keyword', '').strip().lower()
@@ -8060,8 +7901,12 @@ def api_get_emails_v2(email_addr):
 def api_external_get_emails_v2():
     email_addr = get_query_arg_preserve_plus('email', '').strip()
     folder = normalize_folder_name(request.args.get('folder', 'inbox'))
-    skip = int(request.args.get('skip', 0))
-    top = int(request.args.get('top', 1))
+    try:
+        skip = get_int_query_arg('skip', 0, minimum=0)
+        top = get_int_query_arg('top', 1, minimum=1, maximum=50)
+    except ValueError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+
     subject_contains = get_query_arg_preserve_plus('subject_contains', '').strip().lower()
     from_contains = get_query_arg_preserve_plus('from_contains', '').strip().lower()
     keyword = get_query_arg_preserve_plus('keyword', '').strip().lower()
@@ -8072,9 +7917,6 @@ def api_external_get_emails_v2():
     valid_folders = sorted(VALID_MAIL_FOLDERS)
     if folder not in VALID_MAIL_FOLDERS:
         return jsonify({'success': False, 'error': f'folder 参数无效，仅支持 {", ".join(valid_folders)}'}), 400
-
-    if top > 50:
-        top = 50
 
     account = get_account_by_email(email_addr)
     if not account:
@@ -8140,11 +7982,6 @@ def email_matches_filters(account: Dict[str, Any], item: Dict[str, Any],
     return keyword in strip_html_content(body).lower()
 
 
-app.view_functions['api_update_account'] = api_update_account_v2
-app.view_functions['api_get_emails'] = api_get_emails_v2
-app.view_functions['api_external_get_emails'] = api_external_get_emails_v2
-
-
 @app.errorhandler(400)
 def bad_request(error):
     """处理400错误"""
@@ -8155,10 +7992,23 @@ def bad_request(error):
 @app.errorhandler(Exception)
 def handle_exception(error):
     """处理未捕获的异常"""
-    print(f"Unhandled exception: {error}")
-    import traceback
-    traceback.print_exc()
-    return jsonify({'success': False, 'error': str(error)}), 500
+    if isinstance(error, HTTPException):
+        return error
+
+    trace_id = generate_trace_id()
+    try:
+        app.logger.exception("Unhandled exception trace_id=%s", trace_id)
+    except Exception:
+        pass
+    payload = build_error_payload(
+        code='INTERNAL_ERROR',
+        message='服务器内部错误',
+        err_type=type(error).__name__,
+        status=500,
+        details='',
+        trace_id=trace_id
+    )
+    return jsonify({'success': False, 'error': payload}), 500
 
 
 # ==================== 主程序 ====================
@@ -8178,6 +8028,3 @@ if __name__ == '__main__':
 
     init_scheduler()
     app.run(debug=debug, host=host, port=port)
-
-    # 初始化定时任务
-    init_scheduler()

@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 
 os.environ.setdefault('SECRET_KEY', '0123456789abcdef0123456789abcdef')
+os.environ.setdefault('DISABLE_SCHEDULER', '1')
 _temp_dir = tempfile.mkdtemp(prefix='outlookEmail-tests-')
 os.environ['DATABASE_PATH'] = os.path.join(_temp_dir, 'test.db')
 

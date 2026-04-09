@@ -515,7 +515,7 @@
         // ==================== 统一错误处理相关 ====================
 
         function escapeHtml(value) {
-            return String(value || '')
+            return String(value ?? '')
                 .replace(/&/g, '&amp;')
                 .replace(/</g, '&lt;')
                 .replace(/>/g, '&gt;')
@@ -1573,59 +1573,6 @@ ${details}
                 importSelect.onchange = function () {
                     updateImportHint();
                 };
-            }
-        }
-
-        // 更新导入提示文本和渠道选择器
-        function updateImportHint() {
-            const importSelect = document.getElementById('importGroupSelect');
-            const hintEl = document.getElementById('importFormatHint');
-            const inputEl = document.getElementById('accountInput');
-            const channelGroup = document.getElementById('importChannelGroup');
-            const channelSelect = document.getElementById('importChannelSelect');
-            const exampleEl = document.getElementById('importFormatExample');
-            if (!importSelect || !hintEl || !inputEl) return;
-
-            const selectedGroup = groups.find(g => g.id === parseInt(importSelect.value));
-            const isTempGroup = selectedGroup && selectedGroup.name === '临时邮箱';
-
-            if (isTempGroup) {
-                // 显示渠道选择器
-                if (channelGroup) channelGroup.style.display = '';
-
-                const channel = channelSelect ? channelSelect.value : 'gptmail';
-                if (channel === 'duckmail') {
-                    hintEl.textContent = '格式：邮箱----密码，每行一个';
-                    inputEl.placeholder = '邮箱----密码';
-                    if (exampleEl) {
-                        exampleEl.style.display = '';
-                        exampleEl.textContent = '示例：\nuser@duck.com----mypassword\nuser2@duck.com----password2';
-                    }
-                } else if (channel === 'cloudflare') {
-                    hintEl.textContent = '格式：邮箱----JWT，每行一个';
-                    inputEl.placeholder = '邮箱----JWT';
-                    if (exampleEl) {
-                        exampleEl.style.display = '';
-                        exampleEl.textContent = '示例：\nuser@example.com----eyJhbGciOi...\nuser2@example.com----eyJ0eXAiOi...';
-                    }
-                } else {
-                    hintEl.textContent = '格式：每行一个邮箱地址';
-                    inputEl.placeholder = '每行一个邮箱地址';
-                    if (exampleEl) {
-                        exampleEl.style.display = '';
-                        exampleEl.textContent = '示例：\nuser1@gptmail.com\nuser2@gptmail.com';
-                    }
-                }
-            } else {
-                // 隐藏渠道选择器
-                if (channelGroup) channelGroup.style.display = 'none';
-                if (exampleEl) exampleEl.style.display = '';
-                hintEl.textContent = 'Outlook 支持两种格式并自动识别：邮箱----密码----client_id----refresh_token 或 邮箱----密码----refresh_token----client_id';
-                inputEl.placeholder = '邮箱----密码----client_id----refresh_token';
-                if (exampleEl) {
-                    exampleEl.textContent = '示例：\nuser@outlook.com----password123----24d9a0ed-8787-4584-883c-2fd79308940a----0.AXEA...\nuser@outlook.com----password123----0.AXEA...----24d9a0ed-8787-4584-883c-2fd79308940a';
-                }
-                return;
             }
         }
 
@@ -3749,14 +3696,6 @@ ${details}
 
         // ==================== 工具函数 ====================
 
-        // HTML 转义
-        function escapeHtml(text) {
-            if (!text) return '';
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-        }
-
         // 格式化日期
         function formatDate(dateStr) {
             if (!dateStr) return '';
@@ -4059,50 +3998,6 @@ ${details}
             showToast('已生成随机 API Key，请保存设置', 'success');
         }
 
-        // 加载设置
-        async function loadSettings() {
-            try {
-                const response = await fetch('/api/settings');
-                const data = await response.json();
-
-                if (data.success) {
-                    const settingsUsernameInput = document.getElementById('settingsUsername');
-                    if (settingsUsernameInput) {
-                        settingsUsernameInput.value = data.settings.login_username || 'admin';
-                    }
-                    // 密码不显示，只显示 API Key
-                    document.getElementById('settingsApiKey').value = data.settings.gptmail_api_key || '';
-                    document.getElementById('settingsExternalApiKey').value = data.settings.external_api_key || '';
-                    // DuckMail 设置
-                    document.getElementById('settingsDuckmailBaseUrl').value = data.settings.duckmail_base_url || '';
-                    document.getElementById('settingsDuckmailApiKey').value = data.settings.duckmail_api_key || '';
-                    // Cloudflare 设置
-                    document.getElementById('settingsCloudflareWorkerDomain').value = data.settings.cloudflare_worker_domain || '';
-                    document.getElementById('settingsCloudflareEmailDomains').value = data.settings.cloudflare_email_domains || '';
-                    document.getElementById('settingsCloudflareAdminPassword').value = data.settings.cloudflare_admin_password || '';
-
-                    // 密码框留空
-                    document.getElementById('settingsPassword').value = '';
-
-                    // 加载刷新配置
-                    document.getElementById('refreshIntervalDays').value = data.settings.refresh_interval_days || '30';
-                    document.getElementById('refreshDelaySeconds').value = data.settings.refresh_delay_seconds || '5';
-                    document.getElementById('refreshCron').value = data.settings.refresh_cron || '0 2 * * *';
-
-                    // 设置定时刷新开关
-                    const enableScheduled = data.settings.enable_scheduled_refresh !== 'false';
-                    document.getElementById('enableScheduledRefresh').checked = enableScheduled;
-
-                    // 设置刷新策略单选框
-                    const useCron = data.settings.use_cron_schedule === 'true';
-                    document.querySelector('input[name="refreshStrategy"][value="' + (useCron ? 'cron' : 'days') + '"]').checked = true;
-                    toggleRefreshStrategy();
-                }
-            } catch (error) {
-                showToast('加载设置失败', 'error');
-            }
-        }
-
         // 切换刷新策略
         function toggleRefreshStrategy() {
             const strategy = document.querySelector('input[name="refreshStrategy"]:checked').value;
@@ -4160,96 +4055,6 @@ ${details}
                         ✗ 验证失败: ${error.message}
                     </div>
                 `;
-            }
-        }
-
-        // 保存设置
-        async function saveSettings() {
-            const loginUsernameInput = document.getElementById('settingsUsername');
-            const loginUsername = loginUsernameInput ? loginUsernameInput.value.trim() : '';
-            const password = document.getElementById('settingsPassword').value;
-            const apiKey = document.getElementById('settingsApiKey').value.trim();
-            const externalApiKey = document.getElementById('settingsExternalApiKey').value.trim();
-            const refreshDays = document.getElementById('refreshIntervalDays').value;
-            const refreshDelay = document.getElementById('refreshDelaySeconds').value;
-            const refreshCron = document.getElementById('refreshCron').value.trim();
-            const strategy = document.querySelector('input[name="refreshStrategy"]:checked').value;
-            const enableScheduled = document.getElementById('enableScheduledRefresh').checked;
-
-            const settings = {};
-
-            if (!loginUsername) {
-                showToast('登录用户名不能为空', 'error');
-                return;
-            }
-            if (loginUsername.length < 3) {
-                showToast('登录用户名至少 3 位', 'error');
-                return;
-            }
-            settings.login_username = loginUsername;
-
-            // 只有输入了密码才更新密码
-            if (password) {
-                settings.login_password = password;
-            }
-
-            // API Key 可以为空（清除）
-            settings.gptmail_api_key = apiKey;
-
-            // 对外 API Key
-            settings.external_api_key = externalApiKey;
-
-            // DuckMail 设置
-            settings.duckmail_base_url = document.getElementById('settingsDuckmailBaseUrl').value.trim();
-            settings.duckmail_api_key = document.getElementById('settingsDuckmailApiKey').value.trim();
-            settings.cloudflare_worker_domain = document.getElementById('settingsCloudflareWorkerDomain').value.trim();
-            settings.cloudflare_email_domains = document.getElementById('settingsCloudflareEmailDomains').value.trim();
-            settings.cloudflare_admin_password = document.getElementById('settingsCloudflareAdminPassword').value.trim();
-
-            // 刷新配置
-            const days = parseInt(refreshDays);
-            const delay = parseInt(refreshDelay);
-
-            if (isNaN(days) || days < 1 || days > 90) {
-                showToast('刷新周期必须在 1-90 天之间', 'error');
-                return;
-            }
-
-            if (isNaN(delay) || delay < 0 || delay > 60) {
-                showToast('刷新间隔必须在 0-60 秒之间', 'error');
-                return;
-            }
-
-            settings.refresh_interval_days = days;
-            settings.refresh_delay_seconds = delay;
-            settings.use_cron_schedule = strategy === 'cron';
-            settings.enable_scheduled_refresh = enableScheduled;
-
-            if (strategy === 'cron') {
-                if (!refreshCron) {
-                    showToast('请输入 Cron 表达式', 'error');
-                    return;
-                }
-                settings.refresh_cron = refreshCron;
-            }
-
-            try {
-                const response = await fetch('/api/settings', {
-                    method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(settings)
-                });
-
-                const data = await response.json();
-
-                if (data.success) {
-                    showToast('设置已保存，重启应用后生效', 'success');
-                    hideSettingsModal();
-                } else {
-                    handleApiError(data, '保存设置失败');
-                }
-            } catch (error) {
-                showToast('保存设置失败', 'error');
             }
         }
 
@@ -5324,13 +5129,6 @@ ${details}
 
             closeFullscreenEmail();
             updateModalBodyState();
-        }
-
-        // HTML 转义
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
         }
 
         // 键盘快捷键
