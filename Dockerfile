@@ -12,7 +12,8 @@ RUN apt-get update && \
 # 设置环境变量
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PORT=5000
 
 # 复制依赖文件
 COPY requirements.txt .
@@ -32,4 +33,4 @@ RUN mkdir -p /app/data
 EXPOSE 5000
 
 # 启动应用（使用 Gunicorn，单 worker 避免 session 共享问题）
-CMD ["gunicorn", "-w", "1", "-b", "0.0.0.0:5000", "--timeout", "120", "--access-logfile", "-", "--preload", "web_outlook_app:app"]
+CMD ["sh", "-c", "gunicorn -w 1 -b 0.0.0.0:${PORT:-5000} --timeout 120 --access-logfile - --preload web_outlook_app:app"]
