@@ -1,3 +1,14 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Dict, List
+
+if TYPE_CHECKING:
+    # These segmented files are executed into the shared `web_outlook_app`
+    # globals at runtime. Importing from the assembled module keeps IDE
+    # inspections from flagging the shared names as unresolved.
+    from web_outlook_app import *  # noqa: F403
+
+
 def log_refresh_result(account_id: int, account_email: str, refresh_type: str, status: str, error_message: str = None):
     """记录刷新结果到数据库"""
     db = get_db()
@@ -23,9 +34,10 @@ def log_refresh_result(account_id: int, account_email: str, refresh_type: str, s
 
 
 def log_forwarding_result(account_id: int, account_email: str, message_id: str, channel: str,
-                          status: str, error_message: str = None):
+                          status: str, error_message: str = None, db_conn=None):
     """记录转发结果到数据库"""
-    db = get_db()
+    db = db_conn or get_db()
+    should_commit = db_conn is None
     try:
         db.execute('''
             INSERT INTO forwarding_logs (account_id, account_email, message_id, channel, status, error_message)
@@ -38,9 +50,15 @@ def log_forwarding_result(account_id: int, account_email: str, message_id: str, 
             status,
             sanitize_error_details(error_message)[:500] if error_message else None,
         ))
-        db.commit()
+        if should_commit:
+            db.commit()
         return True
     except Exception as e:
+        if should_commit:
+            try:
+                db.rollback()
+            except Exception:
+                pass
         print(f"记录转发结果失败: {str(e)}")
         return False
 
@@ -61,7 +79,7 @@ def test_refresh_token(client_id: str, refresh_token: str, proxy_url: str = None
             },
             timeout=30,
             proxy_url=proxy_url,
-            fallback_proxy_urls=fallback_proxy_urls
+            fallback_proxy_urls=fallback_proxy_urls,
         )
 
         if res.status_code == 200:
@@ -317,7 +335,7 @@ def api_refresh_all_accounts():
 
                 # 获取分组代理设置
                 proxy_url = ''
-                fallback_proxy_urls = ['', '']
+                group_row = None
                 group_id = account['group_id']
                 if group_id:
                     group_cursor = conn.execute(
@@ -327,7 +345,7 @@ def api_refresh_all_accounts():
                     group_row = group_cursor.fetchone()
                     if group_row:
                         proxy_url = group_row['proxy_url'] or ''
-                        fallback_proxy_urls = get_group_proxy_failover_urls(dict(group_row))
+                fallback_proxy_urls = get_group_proxy_failover_urls(dict(group_row) if group_row else None)
 
                 # 测试 refresh token
                 success, error_msg = test_refresh_token(client_id, refresh_token, proxy_url, fallback_proxy_urls)
@@ -547,14 +565,19 @@ def api_trigger_scheduled_refresh():
 
                 # 获取分组代理设置
                 proxy_url = ''
+                group_row = None
                 group_id = account['group_id']
                 if group_id:
-                    group_cursor = conn.execute('SELECT proxy_url FROM groups WHERE id = ?', (group_id,))
+                    group_cursor = conn.execute(
+                        'SELECT proxy_url, fallback_proxy_url_1, fallback_proxy_url_2 FROM groups WHERE id = ?',
+                        (group_id,)
+                    )
                     group_row = group_cursor.fetchone()
                     if group_row:
                         proxy_url = group_row['proxy_url'] or ''
+                fallback_proxy_urls = get_group_proxy_failover_urls(dict(group_row) if group_row else None)
 
-                success, error_msg = test_refresh_token(client_id, refresh_token, proxy_url)
+                success, error_msg = test_refresh_token(client_id, refresh_token, proxy_url, fallback_proxy_urls)
 
                 try:
                     conn.execute('''
@@ -761,6 +784,9 @@ def api_get_failed_forwarding_logs():
 def api_get_account_forwarding_logs(account_id):
     """获取单个账号的转发记录"""
     db = get_db()
+    account = get_account_by_id(account_id)
+    if not account:
+        return jsonify({'success': False, 'error': '账号不存在'}), 404
     limit = int(request.args.get('limit', 100))
     offset = int(request.args.get('offset', 0))
     failed_only = str(request.args.get('failed_only', '')).strip().lower() in ('1', 'true', 'yes', 'on')
@@ -794,7 +820,17 @@ def api_get_account_forwarding_logs(account_id):
             'created_at': row['created_at']
         })
 
-    return jsonify({'success': True, 'logs': logs})
+    return jsonify({
+        'success': True,
+        'logs': logs,
+        'account': {
+            'id': account['id'],
+            'email': account.get('email', ''),
+            'status': account.get('status', 'active'),
+            'forward_enabled': bool(account.get('forward_enabled')),
+            'forward_last_checked_at': account.get('forward_last_checked_at', ''),
+        }
+    })
 
 
 @app.route('/api/accounts/refresh-stats', methods=['GET'])
@@ -848,8 +884,8 @@ def api_get_refresh_stats():
 
 # ==================== Email Deletion Helpers ====================
 
-def delete_emails_graph(client_id: str, refresh_token: str, message_ids: List[str],
-                        proxy_url: str = None, fallback_proxy_urls: List[str] = None) -> Dict[str, Any]:
+def delete_emails_graph(client_id: str, refresh_token: str, message_ids: List[str], proxy_url: str = None,
+                        fallback_proxy_urls: List[str] = None) -> Dict[str, Any]:
     """通过 Graph API 批量删除邮件（永久删除）"""
     access_token = get_access_token_graph(client_id, refresh_token, proxy_url, fallback_proxy_urls)
     if not access_token:
@@ -890,7 +926,7 @@ def delete_emails_graph(client_id: str, refresh_token: str, message_ids: List[st
                 json={"requests": batch_requests},
                 timeout=30,
                 proxy_url=proxy_url,
-                fallback_proxy_urls=fallback_proxy_urls
+                fallback_proxy_urls=fallback_proxy_urls,
             )
             
             if response.status_code == 200:
@@ -930,7 +966,7 @@ def delete_emails_imap(email_addr: str, client_id: str, refresh_token: str, mess
         
         # 连接 IMAP
         with proxy_socket_context(proxy_url):
-            imap = imaplib.IMAP4_SSL(server, IMAP_PORT)
+            imap = imaplib.IMAP4_SSL(server, IMAP_PORT, timeout=IMAP_TIMEOUT)
         imap.authenticate('XOAUTH2', lambda x: auth_string.encode('utf-8'))
         
         # 选择文件夹
@@ -975,7 +1011,7 @@ def get_int_query_arg(
     name: str,
     default: int,
     minimum: Optional[int] = None,
-    maximum: Optional[int] = None
+    maximum: Optional[int] = None,
 ) -> int:
     raw_value = get_query_arg_preserve_plus(name, str(default))
     value = default
@@ -992,26 +1028,39 @@ def get_int_query_arg(
     return value
 
 
+def normalize_email_list_item(item: Dict[str, Any], folder: str) -> Dict[str, Any]:
+    row = dict(item or {})
+    row['subject'] = row.get('subject', '无主题')
+    row['from'] = row.get('from', '未知')
+    row['to'] = str(row.get('to', '') or '')
+    row['date'] = row.get('date', '')
+    row['is_read'] = bool(row.get('is_read', False))
+    row['has_attachments'] = bool(row.get('has_attachments', False))
+    row['body_preview'] = row.get('body_preview', '')
+    row['folder'] = row.get('folder') or folder
+    return row
+
+
 def format_graph_email_item(item: Dict[str, Any], folder: str) -> Dict[str, Any]:
-    return {
+    return normalize_email_list_item({
         'id': item.get('id'),
         'subject': item.get('subject', '无主题'),
         'from': item.get('from', {}).get('emailAddress', {}).get('address', '未知'),
+        'to': ', '.join([
+            recipient.get('emailAddress', {}).get('address', '')
+            for recipient in (item.get('toRecipients') or [])
+            if recipient.get('emailAddress', {}).get('address', '')
+        ]),
         'date': item.get('receivedDateTime', ''),
         'is_read': item.get('isRead', False),
         'has_attachments': item.get('hasAttachments', False),
         'body_preview': item.get('bodyPreview', ''),
         'folder': folder,
-    }
+    }, folder)
 
 
 def format_email_items(items: List[Dict[str, Any]], folder: str) -> List[Dict[str, Any]]:
-    formatted = []
-    for item in items:
-        row = dict(item)
-        row['folder'] = row.get('folder') or folder
-        formatted.append(row)
-    return formatted
+    return [normalize_email_list_item(item, folder) for item in items]
 
 
 def merge_folder_results(results: Dict[str, Dict[str, Any]], skip: int, top: int) -> Dict[str, Any]:
@@ -1099,7 +1148,7 @@ def fetch_account_folder_emails(account: Dict[str, Any], folder: str, skip: int,
         skip,
         top,
         proxy_url,
-        fallback_proxy_urls
+        fallback_proxy_urls,
     )
     if graph_result.get('success'):
         return {
@@ -1112,9 +1161,14 @@ def fetch_account_folder_emails(account: Dict[str, Any], folder: str, skip: int,
     graph_error = graph_result.get('error')
     all_errors['graph'] = graph_error
     if isinstance(graph_error, dict) and graph_error.get('type') in ('ProxyError', 'ConnectionError'):
+        connection_error_message = (
+            '代理连接失败，请检查分组代理设置'
+            if proxy_url
+            else '连接 Microsoft 服务失败，请检查服务器网络、DNS 或上游访问能力'
+        )
         return {
             'success': False,
-            'error': '代理连接失败，请检查分组代理设置',
+            'error': connection_error_message,
             'details': all_errors
         }
 
@@ -1127,7 +1181,7 @@ def fetch_account_folder_emails(account: Dict[str, Any], folder: str, skip: int,
         top,
         IMAP_SERVER_NEW,
         proxy_url,
-        fallback_proxy_urls
+        fallback_proxy_urls,
     )
     if imap_new_result.get('success'):
         return {
@@ -1147,7 +1201,7 @@ def fetch_account_folder_emails(account: Dict[str, Any], folder: str, skip: int,
         top,
         IMAP_SERVER_OLD,
         proxy_url,
-        fallback_proxy_urls
+        fallback_proxy_urls,
     )
     if imap_old_result.get('success'):
         return {
@@ -1193,9 +1247,6 @@ def fetch_account_emails(account: Dict[str, Any], folder: str, skip: int, top: i
 @login_required
 def api_get_emails(email_addr):
     """获取邮件列表（支持分页，不使用缓存）"""
-    if 'api_get_emails_v2' in globals():
-        return api_get_emails_v2(email_addr)
-
     account = get_account_by_email(email_addr)
 
     if not account:
@@ -1208,7 +1259,7 @@ def api_get_emails(email_addr):
         )
         return jsonify({'success': False, 'error': error_payload})
 
-    folder = normalize_folder_name(request.args.get('folder', 'inbox'))
+    folder = normalize_folder_name(get_query_arg_preserve_plus('folder', 'inbox'))
     try:
         skip = get_int_query_arg('skip', 0, minimum=0)
         top = get_int_query_arg('top', 20, minimum=1, maximum=100)
@@ -1267,7 +1318,7 @@ def api_delete_emails():
         message_ids,
         IMAP_SERVER_NEW,
         proxy_url,
-        fallback_proxy_urls
+        fallback_proxy_urls,
     )
     if imap_res['success']:
         return jsonify(imap_res)
@@ -1280,7 +1331,7 @@ def api_delete_emails():
         message_ids,
         IMAP_SERVER_OLD,
         proxy_url,
-        fallback_proxy_urls
+        fallback_proxy_urls,
     )
     if imap_old_res['success']:
         return jsonify(imap_old_res)
@@ -1325,7 +1376,7 @@ def api_get_email_detail(email_addr, message_id):
             account['refresh_token'],
             message_id,
             proxy_url,
-            fallback_proxy_urls
+            fallback_proxy_urls,
         )
         if detail:
             return jsonify({
@@ -1350,11 +1401,9 @@ def api_get_email_detail(email_addr, message_id):
         message_id,
         folder,
         proxy_url,
-        fallback_proxy_urls
+        fallback_proxy_urls,
     )
     if detail:
         return jsonify({'success': True, 'email': detail})
 
     return jsonify({'success': False, 'error': '获取邮件详情失败'})
-
-

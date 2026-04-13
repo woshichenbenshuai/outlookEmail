@@ -3,6 +3,8 @@
             flex: 1;
             display: flex;
             overflow: hidden;
+            min-width: 0;
+            min-height: 0;
         }
 
         /* 邮件列表面板 */
@@ -14,6 +16,7 @@
             flex-direction: column;
             flex-shrink: 0;
             min-width: 0;
+            min-height: 0;
             position: relative;
         }
 
@@ -99,6 +102,9 @@
             overflow-y: auto;
             background-color: #f7f8fb;
             padding: 8px 0 16px;
+            min-height: 0;
+            -webkit-overflow-scrolling: touch;
+            overscroll-behavior: contain;
         }
 
         .email-list-panel.batch-toolbar-active .email-list {
@@ -170,6 +176,13 @@
             min-width: 0;
         }
 
+        .email-sender-block {
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
         .email-item.unread .email-subject {
             font-weight: 700;
         }
@@ -178,6 +191,15 @@
             font-size: 13px;
             font-weight: 600;
             color: #111827;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            min-width: 0;
+        }
+
+        .email-recipient {
+            font-size: 11px;
+            color: #64748b;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
@@ -238,6 +260,31 @@
             align-items: center;
             gap: 12px;
             background-color: #fafafa;
+        }
+
+        .email-detail-toolbar-spacer {
+            flex: 1;
+        }
+
+        .email-detail-action-btn__text {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+        }
+
+        .email-trust-toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 13px;
+            margin-left: 12px;
+            cursor: pointer;
+            color: #374151;
+        }
+
+        .email-trust-toggle input {
+            margin: 0;
         }
 
         .back-btn {
@@ -305,12 +352,22 @@
             color: #1a1a1a;
         }
 
+        .email-detail-meta-inline {
+            display: none;
+        }
+
+        .email-detail-meta-collapsible {
+            display: none;
+        }
+
         .email-detail-body {
             flex: 1;
             padding: 24px 32px;
             overflow-y: auto;
             background-color: #ffffff;
             min-height: 0;
+            -webkit-overflow-scrolling: touch;
+            overscroll-behavior: contain;
         }
 
         .email-detail-body iframe {
@@ -383,6 +440,8 @@
             overflow-y: auto;
             background-color: #ffffff;
             padding: 32px;
+            -webkit-overflow-scrolling: touch;
+            overscroll-behavior: contain;
         }
 
         .fullscreen-email-content iframe {
@@ -467,4 +526,3 @@
                 transform: rotate(360deg);
             }
         }
-

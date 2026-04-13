@@ -1,3 +1,14 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+if TYPE_CHECKING:
+    # These segmented files are executed into the shared `web_outlook_app`
+    # globals at runtime. Importing from the assembled module keeps IDE
+    # inspections from flagging the shared names as unresolved.
+    from web_outlook_app import *  # noqa: F403
+
+
 def build_proxies(proxy_url: str) -> Optional[Dict[str, str]]:
     """构建 requests 的 proxies 参数"""
     if not proxy_url:
@@ -6,7 +17,7 @@ def build_proxies(proxy_url: str) -> Optional[Dict[str, str]]:
 
 
 def build_direct_proxies() -> Dict[str, None]:
-    """显式禁用 requests 环境代理，确保走直连。"""
+    """显式禁用 requests 的环境代理，确保走直连"""
     return {"http": None, "https": None, "all": None}
 
 
@@ -92,7 +103,7 @@ def request_with_proxy_failover(method: str, url: str, *, proxy_url: str = None,
                     "Proxy candidate %s succeeded for %s %s after previous failures",
                     label,
                     method.upper(),
-                    url
+                    url,
                 )
             return response
         except Exception as exc:
@@ -104,7 +115,7 @@ def request_with_proxy_failover(method: str, url: str, *, proxy_url: str = None,
                 label,
                 method.upper(),
                 url,
-                sanitize_error_details(str(exc))
+                sanitize_error_details(str(exc)),
             )
 
     if last_exc:
@@ -190,7 +201,7 @@ def get_access_token_graph_result(client_id: str, refresh_token: str, proxy_url:
             },
             timeout=30,
             proxy_url=proxy_url,
-            fallback_proxy_urls=fallback_proxy_urls
+            fallback_proxy_urls=fallback_proxy_urls,
         )
 
         if res.status_code != 200:
@@ -243,8 +254,9 @@ def get_access_token_graph(client_id: str, refresh_token: str, proxy_url: str = 
     return None
 
 
-def get_emails_graph(client_id: str, refresh_token: str, folder: str = 'inbox', skip: int = 0, top: int = 20,
-                     proxy_url: str = None, fallback_proxy_urls: Optional[List[str]] = None) -> Dict[str, Any]:
+def get_emails_graph(client_id: str, refresh_token: str, folder: str = 'inbox', skip: int = 0,
+                     top: int = 20, proxy_url: str = None,
+                     fallback_proxy_urls: Optional[List[str]] = None) -> Dict[str, Any]:
     """使用 Graph API 获取邮件列表（支持分页和文件夹选择）"""
     token_result = get_access_token_graph_result(client_id, refresh_token, proxy_url, fallback_proxy_urls)
     if not token_result.get("success"):
@@ -267,7 +279,7 @@ def get_emails_graph(client_id: str, refresh_token: str, folder: str = 'inbox', 
         params = {
             "$top": top,
             "$skip": skip,
-            "$select": "id,subject,from,receivedDateTime,isRead,hasAttachments,bodyPreview",
+            "$select": "id,subject,from,toRecipients,receivedDateTime,isRead,hasAttachments,bodyPreview",
             "$orderby": "receivedDateTime desc"
         }
         headers = {
@@ -281,7 +293,7 @@ def get_emails_graph(client_id: str, refresh_token: str, folder: str = 'inbox', 
             params=params,
             timeout=30,
             proxy_url=proxy_url,
-            fallback_proxy_urls=fallback_proxy_urls
+            fallback_proxy_urls=fallback_proxy_urls,
         )
 
         if res.status_code != 200:
@@ -334,7 +346,7 @@ def get_email_detail_graph(client_id: str, refresh_token: str, message_id: str, 
             params=params,
             timeout=30,
             proxy_url=proxy_url,
-            fallback_proxy_urls=fallback_proxy_urls
+            fallback_proxy_urls=fallback_proxy_urls,
         )
         
         if res.status_code != 200:
@@ -361,7 +373,7 @@ def get_access_token_imap_result(client_id: str, refresh_token: str, proxy_url: 
             },
             timeout=30,
             proxy_url=proxy_url,
-            fallback_proxy_urls=fallback_proxy_urls
+            fallback_proxy_urls=fallback_proxy_urls,
         )
 
         if res.status_code != 200:
@@ -419,10 +431,20 @@ def get_emails_imap(account: str, client_id: str, refresh_token: str, folder: st
                     fallback_proxy_urls: Optional[List[str]] = None) -> Dict[str, Any]:
     """使用 IMAP 获取邮件列表（支持分页和文件夹选择）- 默认使用新版服务器"""
     return get_emails_imap_with_server(
-        account, client_id, refresh_token, folder, skip, top, IMAP_SERVER_NEW, proxy_url, fallback_proxy_urls
+        account,
+        client_id,
+        refresh_token,
+        folder,
+        skip,
+        top,
+        IMAP_SERVER_NEW,
+        proxy_url,
+        fallback_proxy_urls,
     )
 
 
+def get_emails_imap_with_server(account: str, client_id: str, refresh_token: str, folder: str = 'inbox', skip: int = 0, top: int = 20, server: str = IMAP_SERVER_NEW, proxy_url: str = None) -> Dict[str, Any]:
+    """使用 IMAP 获取邮件列表（支持分页、文件夹选择和服务器选择）"""
 def get_emails_imap_with_server(account: str, client_id: str, refresh_token: str, folder: str = 'inbox',
                                 skip: int = 0, top: int = 20, server: str = IMAP_SERVER_NEW,
                                 proxy_url: str = None,
@@ -437,7 +459,7 @@ def get_emails_imap_with_server(account: str, client_id: str, refresh_token: str
     connection = None
     try:
         with proxy_socket_context(proxy_url):
-            connection = imaplib.IMAP4_SSL(server, IMAP_PORT)
+            connection = imaplib.IMAP4_SSL(server, IMAP_PORT, timeout=IMAP_TIMEOUT)
         auth_string = f"user={account}\1auth=Bearer {access_token}\1\1".encode('utf-8')
         connection.authenticate('XOAUTH2', lambda x: auth_string)
 
@@ -487,13 +509,15 @@ def get_emails_imap_with_server(account: str, client_id: str, refresh_token: str
                 if status == 'OK' and msg_data and msg_data[0]:
                     raw_email = msg_data[0][1]
                     msg = email.message_from_bytes(raw_email)
+                    body_preview = get_email_body(msg)
 
                     emails.append({
                         'id': msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id),
                         'subject': decode_header_value(msg.get("Subject", "无主题")),
                         'from': decode_header_value(msg.get("From", "未知发件人")),
+                        'to': decode_header_value(msg.get("To", "")),
                         'date': msg.get("Date", "未知时间"),
-                        'body_preview': get_email_body(msg)[:200] + "..." if len(get_email_body(msg)) > 200 else get_email_body(msg)
+                        'body_preview': body_preview[:200] + "..." if len(body_preview) > 200 else body_preview
                     })
             except Exception:
                 continue
@@ -518,8 +542,9 @@ def get_emails_imap_with_server(account: str, client_id: str, refresh_token: str
                 pass
 
 
-def get_email_detail_imap(account: str, client_id: str, refresh_token: str, message_id: str, folder: str = 'inbox',
-                          proxy_url: str = None, fallback_proxy_urls: Optional[List[str]] = None) -> Optional[Dict]:
+def get_email_detail_imap(account: str, client_id: str, refresh_token: str, message_id: str,
+                          folder: str = 'inbox', proxy_url: str = None,
+                          fallback_proxy_urls: Optional[List[str]] = None) -> Optional[Dict]:
     """使用 IMAP 获取邮件详情"""
     access_token = get_access_token_imap(client_id, refresh_token, proxy_url, fallback_proxy_urls)
     if not access_token:
@@ -528,7 +553,7 @@ def get_email_detail_imap(account: str, client_id: str, refresh_token: str, mess
     connection = None
     try:
         with proxy_socket_context(proxy_url):
-            connection = imaplib.IMAP4_SSL(IMAP_SERVER_NEW, IMAP_PORT)
+            connection = imaplib.IMAP4_SSL(IMAP_SERVER_NEW, IMAP_PORT, timeout=IMAP_TIMEOUT)
         auth_string = f"user={account}\1auth=Bearer {access_token}\1\1".encode('utf-8')
         connection.authenticate('XOAUTH2', lambda x: auth_string)
 
@@ -630,10 +655,10 @@ def create_imap_connection(imap_host: str, imap_port: int = 993, proxy_url: str 
         raise ValueError('IMAP host 不能为空')
     try:
         with proxy_socket_context(proxy_url):
-            return imaplib.IMAP4_SSL(host, port, timeout=30)
+            return imaplib.IMAP4_SSL(host, port, timeout=IMAP_TIMEOUT)
     except TypeError:
         old_timeout = socket.getdefaulttimeout()
-        socket.setdefaulttimeout(30)
+        socket.setdefaulttimeout(IMAP_TIMEOUT)
         try:
             with proxy_socket_context(proxy_url):
                 return imaplib.IMAP4_SSL(host, port)
@@ -922,6 +947,7 @@ def get_emails_imap_generic(email_addr: str, imap_password: str, imap_host: str,
                     'id': uid.decode('utf-8', errors='ignore') if isinstance(uid, (bytes, bytearray)) else str(uid),
                     'subject': decode_header_value(msg.get('Subject', '无主题')),
                     'from': decode_header_value(msg.get('From', '未知')),
+                    'to': decode_header_value(msg.get('To', '')),
                     'date': msg.get('Date', ''),
                     'is_read': '\\Seen' in (flags_text or ''),
                     'has_attachments': has_message_attachments(msg),
@@ -1095,4 +1121,3 @@ def api_key_required(f):
 
 
 # ==================== Flask 路由 ====================
-

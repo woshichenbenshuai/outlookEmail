@@ -1,3 +1,5 @@
+        /* global accountsCache, closeMobilePanels, currentAccount, currentEmailDetail, currentEmailId, currentEmails, currentMethod, currentGroupId, escapeHtml, formatDate, groups, handleApiError, loadGroups, loadTempEmails, renderEmailDetail, renderEmailList, showEmailList, showMobileEmailDetail, showToast, updateMobileContext, updateCurrentGroupHeader */
+
         // ==================== 临时邮箱相关 ====================
 
         // 加载临时邮箱列表
@@ -340,6 +342,9 @@
 
             document.getElementById('currentAccount').classList.add('show');
             document.getElementById('currentAccountEmail').textContent = email + ' (临时)';
+            showEmailList();
+            closeMobilePanels();
+            updateMobileContext();
 
             document.querySelectorAll('.account-item').forEach(item => {
                 item.classList.remove('active');
@@ -447,6 +452,8 @@
                                 <div class="empty-state-text">选择一封邮件查看详情</div>
                             </div>
                         `;
+                        showEmailList();
+                        updateMobileContext();
                     }
 
                     loadTempEmails(true);
@@ -529,6 +536,7 @@
             document.getElementById('emailDetailToolbar').style.display = 'flex';
             const deleteBtn = document.querySelector('#emailDetailToolbar .batch-btn.danger');
             if (deleteBtn) deleteBtn.style.display = 'none';
+            showMobileEmailDetail();
 
             const container = document.getElementById('emailDetail');
             container.innerHTML = '<div class="loading"><div class="loading-spinner"></div></div>';
@@ -557,4 +565,3 @@
                 `;
             }
         }
-

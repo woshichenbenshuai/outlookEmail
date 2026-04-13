@@ -6,8 +6,7 @@ import unittest
 from unittest.mock import patch
 
 
-os.environ.setdefault('SECRET_KEY', '0123456789abcdef0123456789abcdef')
-os.environ.setdefault('DISABLE_SCHEDULER', '1')
+os.environ.setdefault('SECRET_KEY', 'test-secret-key')
 _temp_dir = tempfile.mkdtemp(prefix='outlookEmail-tests-')
 os.environ['DATABASE_PATH'] = os.path.join(_temp_dir, 'test.db')
 
@@ -394,50 +393,160 @@ class BatchForwardingApiTests(unittest.TestCase):
         self.assertEqual(enabled_account['forward_last_checked_at'], self.enabled_cursor_before)
 
 
-class ProxyFailoverTests(unittest.TestCase):
+class AssetRenderingTests(unittest.TestCase):
     def setUp(self):
         self.app = web_outlook_app.app
         self.app.config['TESTING'] = True
         self.client = self.app.test_client()
+
+    def test_index_uses_bundled_stylesheet_route(self):
+        with self.client.session_transaction() as session:
+            session['logged_in'] = True
+
+        response = self.client.get('/')
+        html = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('href="/assets/index.css"', html)
+        self.assertNotIn('href="/static/index.css"', html)
+
+    def test_bundled_stylesheet_contains_combined_css_without_imports(self):
+        response = self.client.get('/assets/index.css')
+        css = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, 'text/css')
+        self.assertNotIn('@import', css)
+        self.assertIn('.toast', css)
+        self.assertIn('.group-panel', css)
+        self.assertIn('.account-panel', css)
+
+
+class RefreshTokenProxyFallbackTests(unittest.TestCase):
+    def setUp(self):
+        self.app = web_outlook_app.app
+        self.app.config['TESTING'] = True
+        self.client = self.app.test_client()
+
         with self.client.session_transaction() as sess:
             sess['logged_in'] = True
 
-    def test_proxy_failover_candidates_normalize_direct_and_deduplicate(self):
-        candidates = web_outlook_app.get_proxy_failover_candidates(
-            'socks5://127.0.0.1:1080',
-            ['direct', '直连', 'socks5://127.0.0.1:1080', 'http://127.0.0.1:7890']
+        with self.app.app_context():
+            db = web_outlook_app.get_db()
+            db.execute('DELETE FROM account_refresh_logs')
+            db.execute('DELETE FROM accounts')
+            db.execute("DELETE FROM groups WHERE name NOT IN ('默认分组', '临时邮箱')")
+            db.commit()
+
+            group_id = web_outlook_app.add_group(
+                '代理刷新组',
+                '测试代理失败后直连重试',
+                '#225588',
+                'socks5://127.0.0.1:1080',
+                'http://127.0.0.1:7891',
+                'direct',
+            )
+            self.assertIsNotNone(group_id)
+            self.group_id = group_id
+
+            added = web_outlook_app.add_account(
+                'proxy-refresh@outlook.com',
+                'password123',
+                '24d9a0ed-8787-4584-883c-2fd79308940a',
+                '0.AXEA_refresh',
+                group_id=group_id,
+                remark='代理刷新测试账号',
+                forward_enabled=False,
+            )
+            self.assertTrue(added)
+
+            account = web_outlook_app.get_account_by_email('proxy-refresh@outlook.com')
+            self.assertIsNotNone(account)
+            self.account_id = account['id']
+
+    def test_refresh_account_retries_with_fallback_proxies_in_order(self):
+        class FakeResponse:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {'access_token': 'access-token'}
+
+        proxy_error = web_outlook_app.requests.exceptions.ConnectionError(
+            'SOCKSHTTPSConnectionPool(host=\'login.microsoftonline.com\', port=443): '
+            'Max retries exceeded with url: /common/oauth2/v2.0/token '
+            '(Caused by NewConnectionError("SOCKSHTTPSConnection(host=\'login.microsoftonline.com\', '
+            'port=443): Failed to establish a new connection: 0x04: Host unreachable"))'
         )
 
-        self.assertEqual([item[1] for item in candidates], [
-            'socks5://127.0.0.1:1080',
-            web_outlook_app.DIRECT_PROXY_SENTINEL,
-            'http://127.0.0.1:7890',
-        ])
+        http_proxy_error = web_outlook_app.requests.exceptions.ProxyError(
+            'HTTPSConnectionPool(host=\'login.microsoftonline.com\', port=443): '
+            'Max retries exceeded with url: /common/oauth2/v2.0/token '
+            '(Caused by ProxyError(\'Unable to connect to proxy\', OSError(\'proxy connect failed\')))'
+        )
+
+        with patch.object(web_outlook_app.requests, 'request', side_effect=[proxy_error, http_proxy_error, FakeResponse()]) as mocked_request:
+            response = self.client.post(f'/api/accounts/{self.account_id}/refresh')
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload['success'])
+        self.assertEqual(payload['message'], 'Token 刷新成功')
+        self.assertEqual(mocked_request.call_count, 3)
+        self.assertEqual(
+            mocked_request.call_args_list[0].kwargs['proxies'],
+            {'http': 'socks5://127.0.0.1:1080', 'https': 'socks5://127.0.0.1:1080'},
+        )
+        self.assertEqual(
+            mocked_request.call_args_list[1].kwargs['proxies'],
+            {'http': 'http://127.0.0.1:7891', 'https': 'http://127.0.0.1:7891'},
+        )
+        self.assertEqual(
+            mocked_request.call_args_list[2].kwargs['proxies'],
+            {'http': None, 'https': None, 'all': None},
+        )
+
+        with self.app.app_context():
+            db = web_outlook_app.get_db()
+            log_row = db.execute(
+                '''
+                SELECT status, error_message
+                FROM account_refresh_logs
+                WHERE account_id = ?
+                ORDER BY id DESC
+                LIMIT 1
+                ''',
+                (self.account_id,),
+            ).fetchone()
+
+        self.assertIsNotNone(log_row)
+        self.assertEqual(log_row['status'], 'success')
+        self.assertIsNone(log_row['error_message'])
 
     def test_group_api_persists_proxy_failover_fields(self):
-        create_resp = self.client.post(
-            '/api/groups',
+        response = self.client.put(
+            f'/api/groups/{self.group_id}',
             json={
-                'name': '代理回退测试组',
-                'description': '用于测试代理回退字段',
+                'name': '代理刷新组',
+                'description': '测试代理失败后直连重试',
                 'color': '#225588',
                 'proxy_url': 'socks5://127.0.0.1:1080',
-                'fallback_proxy_url_1': 'http://127.0.0.1:7891',
-                'fallback_proxy_url_2': 'direct',
-                'sort_position': 1
+                'fallback_proxy_url_1': 'socks5://127.0.0.1:2080',
+                'fallback_proxy_url_2': '直连',
+                'sort_position': 1,
             }
         )
-        self.assertEqual(create_resp.status_code, 200)
-        create_payload = create_resp.get_json()
-        self.assertTrue(create_payload['success'])
-        group_id = create_payload['group_id']
 
-        get_resp = self.client.get(f'/api/groups/{group_id}')
-        self.assertEqual(get_resp.status_code, 200)
-        payload = get_resp.get_json()
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
         self.assertTrue(payload['success'])
-        self.assertEqual(payload['group'].get('fallback_proxy_url_1'), 'http://127.0.0.1:7891')
-        self.assertEqual(payload['group'].get('fallback_proxy_url_2'), 'direct')
+
+        response = self.client.get(f'/api/groups/{self.group_id}')
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload['success'])
+        self.assertEqual(payload['group']['fallback_proxy_url_1'], 'socks5://127.0.0.1:2080')
+        self.assertEqual(payload['group']['fallback_proxy_url_2'], '直连')
 
 
 if __name__ == '__main__':

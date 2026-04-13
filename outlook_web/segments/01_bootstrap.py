@@ -23,7 +23,6 @@ import bcrypt
 import base64
 import html
 import socket
-from pathlib import Path
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
@@ -37,6 +36,7 @@ import requests
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from outlook_web.runtime import default_database_path, resource_path, resolve_secret_key, runtime_root
 
 # 尝试导入 Flask-WTF CSRF 保护
 try:
@@ -51,59 +51,12 @@ try:
 except ImportError:
     socks = None
 
-app = Flask(__name__)
-
-WEAK_SECRET_KEYS = {
-    "your-secret-key-here",
-    "secret",
-    "password",
-    "admin",
-    "admin123",
-    "123456",
-    "12345678",
-}
-
-
-def _is_weak_secret_key(value: str) -> bool:
-    key = (value or "").strip()
-    if len(key) < 32:
-        return True
-    return key.lower() in WEAK_SECRET_KEYS
-
-
-def resolve_secret_key() -> str:
-    """
-    Resolve SECRET_KEY with secure fallback:
-    1) use SECRET_KEY env if provided and strong enough
-    2) load from SECRET_KEY_FILE if present
-    3) generate random key and persist to SECRET_KEY_FILE
-    """
-    env_secret_key = (os.getenv("SECRET_KEY") or "").strip()
-    if env_secret_key:
-        if _is_weak_secret_key(env_secret_key):
-            raise RuntimeError("SECRET_KEY is too weak; use at least 32 random characters")
-        return env_secret_key
-
-    secret_key_file = Path(os.getenv("SECRET_KEY_FILE", "data/secret_key"))
-
-    if secret_key_file.exists():
-        file_secret_key = secret_key_file.read_text(encoding="utf-8").strip()
-        if not file_secret_key:
-            raise RuntimeError(f"SECRET_KEY_FILE is empty: {secret_key_file}")
-        if _is_weak_secret_key(file_secret_key):
-            raise RuntimeError(f"SECRET_KEY in file is too weak: {secret_key_file}")
-        return file_secret_key
-
-    secret_key_file.parent.mkdir(parents=True, exist_ok=True)
-    generated_secret_key = secrets.token_hex(32)
-    secret_key_file.write_text(generated_secret_key, encoding="utf-8")
-    try:
-        os.chmod(secret_key_file, 0o600)
-    except Exception:
-        pass
-    return generated_secret_key
-
-
+app = Flask(
+    __name__,
+    template_folder=str(resource_path("templates")),
+    static_folder=str(resource_path("static")),
+)
+# 优先使用环境变量；打包后的桌面版会在首次启动时生成并持久化 secret_key
 secret_key = resolve_secret_key()
 app.secret_key = secret_key
 # 设置 session 过期时间（默认 7 天）
@@ -159,9 +112,10 @@ TOKEN_URL_IMAP = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
 IMAP_SERVER_OLD = "outlook.office365.com"
 IMAP_SERVER_NEW = "outlook.live.com"
 IMAP_PORT = 993
+IMAP_TIMEOUT = int(os.getenv("IMAP_TIMEOUT", "45"))
 
 try:
-    with open('VERSION', 'r', encoding='utf-8') as version_file:
+    with resource_path('VERSION').open('r', encoding='utf-8') as version_file:
         APP_VERSION = version_file.read().strip() or '1.0.0'
 except Exception:
     APP_VERSION = '1.0.0'
@@ -288,7 +242,7 @@ FORWARD_CHANNEL_TG_SETTING = "telegram"
 SMTP_FORWARD_PROVIDERS = ('outlook', 'qq', '163', '126', 'yahoo', 'aliyun', 'custom')
 
 # 数据库文件
-DATABASE = os.getenv("DATABASE_PATH", "data/outlook_accounts.db")
+DATABASE = os.getenv("DATABASE_PATH", str(default_database_path()))
 
 # GPTMail API 配置
 GPTMAIL_BASE_URL = os.getenv("GPTMAIL_BASE_URL", "https://mail.chatgpt.org.uk")
@@ -765,9 +719,6 @@ def init_db():
             name TEXT UNIQUE NOT NULL,
             description TEXT,
             color TEXT DEFAULT '#1a1a1a',
-            proxy_url TEXT,
-            fallback_proxy_url_1 TEXT,
-            fallback_proxy_url_2 TEXT,
             sort_order INTEGER DEFAULT 0,
             is_system INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -1001,6 +952,7 @@ def init_db():
             )
     
     # 初始化默认设置
+    # 检查是否已有密码设置
     cursor.execute("SELECT value FROM settings WHERE key = 'login_username'")
     existing_login_username = cursor.fetchone()
     if existing_login_username:
@@ -1016,7 +968,6 @@ def init_db():
             (LOGIN_USERNAME,)
         )
 
-    # 检查是否已有密码设置
     cursor.execute("SELECT value FROM settings WHERE key = 'login_password'")
     existing_password = cursor.fetchone()
 
@@ -1248,9 +1199,6 @@ def migrate_sensitive_data(conn):
 
 def init_app():
     """初始化应用（确保目录和数据库存在）"""
-    # 确保 templates 目录存在
-    os.makedirs('templates', exist_ok=True)
-    
     # 确保数据目录存在
     data_dir = os.path.dirname(DATABASE)
     if data_dir:
@@ -1262,6 +1210,7 @@ def init_app():
     print("=" * 60)
     print("Outlook 邮件 Web 应用已初始化")
     print(f"数据库文件: {DATABASE}")
+    print(f"运行目录: {runtime_root()}")
     print(f"GPTMail API: {GPTMAIL_BASE_URL}")
     print(f"DuckMail API: {DUCKMAIL_BASE_URL}")
     print(f"Cloudflare Temp Email Worker: {CLOUDFLARE_WORKER_DOMAIN or '未配置'}")
@@ -1330,7 +1279,6 @@ def get_login_password() -> str:
 
 
 def get_login_username() -> str:
-    """获取登录用户名（优先从数据库读取）"""
     username = (get_setting('login_username') or '').strip()
     return username if username else LOGIN_USERNAME
 
@@ -1369,5 +1317,3 @@ def get_cloudflare_email_domains() -> List[str]:
     raw_domains = get_setting('cloudflare_email_domains')
     value = raw_domains if raw_domains is not None else CLOUDFLARE_EMAIL_DOMAINS
     return [domain.strip() for domain in value.split(',') if domain.strip()]
-
-

@@ -1,3 +1,5 @@
+        /* global adjustIframeHeight, closeMobilePanels, closeNavbarActionsMenu, copyCurrentEmail, currentAccount, currentEmailDetail, currentEmailId, currentEmails, currentFolder, currentMethod, emailListCache, escapeHtml, formatDate, handleApiError, isTempEmailGroup, showMobileEmailDetail, showToast, updateMobileContext, updateModalBodyState */
+
         // ==================== 邮件相关 ====================
 
         // 加载邮件列表
@@ -108,6 +110,29 @@
         let selectedEmailIds = new Set();
         let isBatchSelectMode = false;
 
+        function getRecipientDisplayLabel(emailItem) {
+            if (isTempEmailGroup) {
+                return '';
+            }
+
+            const normalizedCurrentAccount = String(currentAccount || '').trim().toLowerCase();
+            const toValue = String(emailItem?.to || '').trim();
+            if (!normalizedCurrentAccount || !toValue) {
+                return '';
+            }
+
+            const recipientCandidates = toValue.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [];
+            const recipients = recipientCandidates.length > 0
+                ? recipientCandidates.map(recipient => recipient.trim().toLowerCase())
+                : [toValue.toLowerCase()];
+
+            if (recipients.includes(normalizedCurrentAccount)) {
+                return '';
+            }
+
+            return `to: ${toValue}`;
+        }
+
         function renderEmailList(emails) {
             const container = document.getElementById('emailList');
 
@@ -131,6 +156,7 @@
             container.innerHTML = emails.map((email, index) => {
                 const isChecked = selectedEmailIds.has(email.id);
                 const isActive = currentEmailId === email.id;
+                const recipientDisplayLabel = getRecipientDisplayLabel(email);
                 return `
                 <div class="email-item ${email.is_read === false ? 'unread' : ''} ${isActive ? 'active' : ''}"
                      onclick="${clickHandler}('${email.id}', ${index})">
@@ -140,7 +166,10 @@
                     <div class="email-body">
                         <div class="email-top-row">
                             <div class="email-top-main">
-                                <div class="email-from" title="${escapeHtml(email.from || '未知发件人')}">${escapeHtml(email.from || '未知发件人')}</div>
+                                <div class="email-sender-block">
+                                    <div class="email-from" title="${escapeHtml(email.from || '未知发件人')}">${escapeHtml(email.from || '未知发件人')}</div>
+                                    ${recipientDisplayLabel ? `<div class="email-recipient" title="${escapeHtml(recipientDisplayLabel)}">${escapeHtml(recipientDisplayLabel)}</div>` : ''}
+                                </div>
                             </div>
                             <div class="email-date">${formatDate(email.date)}</div>
                         </div>
@@ -295,13 +324,16 @@
             // 这里不重置 currentEmailDetail，等到 fetch 成功后再设置
 
             // 重置信任模式
-            document.getElementById('trustEmailCheckbox').checked = false;
+            const trustCheckbox = document.getElementById('trustEmailCheckbox');
+            trustCheckbox.checked = false;
             isTrustedMode = false;
+            updateTrustToggleState(trustCheckbox);
 
             // 显示工具栏
             document.getElementById('emailDetailToolbar').style.display = 'flex';
             const deleteBtn = document.querySelector('#emailDetailToolbar .batch-btn.danger');
             if (deleteBtn) deleteBtn.style.display = '';
+            showMobileEmailDetail();
 
             // 加载邮件详情
             const container = document.getElementById('emailDetail');
@@ -336,6 +368,7 @@
         // 渲染邮件详情
         function renderEmailDetail(email) {
             const container = document.getElementById('emailDetail');
+            const compactMobileMeta = typeof isMobileLayout === 'function' && isMobileLayout();
 
             const isHtml = email.body_type === 'html' ||
                 (email.body && (email.body.includes('<html') || email.body.includes('<div') || email.body.includes('<p>')));
@@ -344,30 +377,55 @@
                 ? `<iframe id="emailBodyFrame" sandbox="allow-same-origin" onload="adjustIframeHeight(this)"></iframe>`
                 : `<div class="email-body-text">${escapeHtml(email.body)}</div>`;
 
-            container.innerHTML = `
+            const detailMetaRows = `
+                <div class="email-detail-meta-row">
+                    <span class="email-detail-meta-label">发件人</span>
+                    <span class="email-detail-meta-value">${escapeHtml(email.from)}</span>
+                </div>
+                <div class="email-detail-meta-row">
+                    <span class="email-detail-meta-label">收件人</span>
+                    <span class="email-detail-meta-value">${escapeHtml(email.to || '-')}</span>
+                </div>
+                ${email.cc ? `
+                <div class="email-detail-meta-row">
+                    <span class="email-detail-meta-label">抄送</span>
+                    <span class="email-detail-meta-value">${escapeHtml(email.cc)}</span>
+                </div>
+                ` : ''}
+                <div class="email-detail-meta-row">
+                    <span class="email-detail-meta-label">时间</span>
+                    <span class="email-detail-meta-value">${formatDate(email.date)}</span>
+                </div>
+            `;
+
+            const detailHeader = compactMobileMeta
+                ? `
+                <div class="email-detail-header email-detail-header--compact">
+                    <div class="email-detail-subject">${escapeHtml(email.subject || '无主题')}</div>
+                    <div class="email-detail-meta-inline">
+                        <span class="email-detail-meta-inline__from">${escapeHtml(email.from || '未知发件人')}</span>
+                        <span class="email-detail-meta-inline__dot"></span>
+                        <span class="email-detail-meta-inline__time">${formatDate(email.date)}</span>
+                    </div>
+                    <details class="email-detail-meta-collapsible">
+                        <summary class="email-detail-meta-collapsible__summary">查看邮件信息</summary>
+                        <div class="email-detail-meta email-detail-meta--compact">
+                            ${detailMetaRows}
+                        </div>
+                    </details>
+                </div>
+                `
+                : `
                 <div class="email-detail-header">
                     <div class="email-detail-subject">${escapeHtml(email.subject || '无主题')}</div>
                     <div class="email-detail-meta">
-                        <div class="email-detail-meta-row">
-                            <span class="email-detail-meta-label">发件人</span>
-                            <span class="email-detail-meta-value">${escapeHtml(email.from)}</span>
-                        </div>
-                        <div class="email-detail-meta-row">
-                            <span class="email-detail-meta-label">收件人</span>
-                            <span class="email-detail-meta-value">${escapeHtml(email.to || '-')}</span>
-                        </div>
-                        ${email.cc ? `
-                        <div class="email-detail-meta-row">
-                            <span class="email-detail-meta-label">抄送</span>
-                            <span class="email-detail-meta-value">${escapeHtml(email.cc)}</span>
-                        </div>
-                        ` : ''}
-                        <div class="email-detail-meta-row">
-                            <span class="email-detail-meta-label">时间</span>
-                            <span class="email-detail-meta-value">${formatDate(email.date)}</span>
-                        </div>
+                        ${detailMetaRows}
                     </div>
                 </div>
+                `;
+
+            container.innerHTML = `
+                ${detailHeader}
                 <div class="email-detail-body">
                     ${bodyContent}
                 </div>
@@ -492,6 +550,10 @@
                 panel.classList.add('hidden');
                 toggleText.textContent = '显示列表';
             }
+
+            closeMobilePanels();
+            closeNavbarActionsMenu();
+            updateMobileContext();
         }
 
         // 全屏查看邮件
@@ -558,7 +620,12 @@
         }
 
         // 切换信任模式
+        function updateTrustToggleState(checkbox) {
+            checkbox?.closest('.email-trust-toggle')?.classList.toggle('is-active', !!checkbox?.checked);
+        }
+
         function toggleTrustMode(checkbox) {
+            updateTrustToggleState(checkbox);
             if (checkbox.checked) {
                 if (confirm('⚠️ 警告：启用信任模式将直接显示邮件原始内容，不进行任何安全过滤。\n\n这可能包含恶意脚本或不安全的内容。您确定要继续吗？')) {
                     isTrustedMode = true;
@@ -567,6 +634,7 @@
                     }
                 } else {
                     checkbox.checked = false;
+                    updateTrustToggleState(checkbox);
                 }
             } else {
                 isTrustedMode = false;
@@ -641,6 +709,9 @@
             document.getElementById('emailListPanel').classList.remove('hidden');
             isListVisible = true;
             document.getElementById('toggleListText').textContent = '隐藏列表';
+            closeMobilePanels();
+            closeNavbarActionsMenu();
+            updateMobileContext();
         }
 
         // 刷新邮件
@@ -690,4 +761,3 @@
                 window.location.href = '/logout';
             }
         }
-

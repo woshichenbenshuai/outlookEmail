@@ -67,6 +67,29 @@ def favicon():
     return response
 
 
+@app.route('/assets/index.css')
+def bundled_index_css():
+    css_root = os.path.join(app.static_folder, 'css', 'index')
+    css_parts = (
+        '01-base.css',
+        '02-navbar.css',
+        '03-layout.css',
+        '04-account-panel.css',
+        '05-email-content.css',
+        '06-modals-toast.css',
+        '07-meta.css',
+        '08-responsive.css',
+    )
+
+    css_chunks = []
+    for filename in css_parts:
+        css_file_path = os.path.join(css_root, filename)
+        with open(css_file_path, 'r', encoding='utf-8') as css_file:
+            css_chunks.append(css_file.read())
+    combined_css = '\n\n'.join(css_chunks)
+    return Response(combined_css, mimetype='text/css')
+
+
 @app.route('/')
 @login_required
 def index():

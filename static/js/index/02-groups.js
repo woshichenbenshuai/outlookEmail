@@ -1,3 +1,5 @@
+        /* global accountsCache, closeAllModals, currentAccount, currentAccountListSource, currentEmailDetail, currentEmailId, currentEmails, currentGroupId, currentSkip, currentSortBy, currentSortOrder, deleteAccount, editingGroupId, escapeHtml, formatRelativeTime, generateTempEmail, groups, handleApiError, hasMoreEmails, hideModal, isMobileLayout, isTempEmailGroup, loadTempEmails, localStorage, openMobilePanel, resetSelectedAccountView, selectedColor, selectedTagFilters, setModalVisible, showAddAccountModal, showGetRefreshTokenModal, showModal, showRefreshError, showTagManagementModal, showToast, suppressGroupClickUntil, tempEmailGroupId, updateCurrentGroupHeader, updateMobileContext */
+
         // ==================== 分组相关 ====================
 
         // 加载分组列表
@@ -50,6 +52,8 @@
                             selectGroup(currentGroupId);
                         }
                     }
+
+                    updateMobileContext();
                 }
             } catch (error) {
                 container.innerHTML = '<div class="empty-state"><div class="empty-state-text">加载失败</div></div>';
@@ -400,6 +404,8 @@
             }
             // 更新账号面板头部动作
             updateAccountPanelActions();
+            const shouldAdvanceToAccounts = isMobileLayout()
+                && document.getElementById('groupPanel')?.classList.contains('show');
 
             // 加载该分组的邮箱
             if (isTempEmailGroup) {
@@ -407,6 +413,11 @@
             } else {
                 await loadAccountsByGroup(groupId);
             }
+
+            if (shouldAdvanceToAccounts) {
+                openMobilePanel('account');
+            }
+            updateMobileContext();
         }
 
         // 更新账号面板头部动作按钮
@@ -538,6 +549,20 @@
             return `<div class="account-aliases" title="${escapeHtml(safeAliases.join('\n'))}">别名: ${escapeHtml(aliasText)}${suffix}</div>`;
         }
 
+        function renderAccountGroupSummary(account, showGroupInfo = false) {
+            if (!showGroupInfo) return '';
+
+            const groupName = String(account.group_name || '默认分组').trim() || '默认分组';
+            const groupColor = account.group_color || '#666666';
+            return `
+                <div class="account-group-summary" title="所属分组: ${escapeHtml(groupName)}">
+                    <span class="account-group-dot" style="background-color: ${escapeHtml(groupColor)}"></span>
+                    <span class="account-group-label">分组:</span>
+                    <span class="account-group-name">${escapeHtml(groupName)}</span>
+                </div>
+            `;
+        }
+
         function isAccountRowInteractiveTarget(target) {
             if (!target || typeof target.closest !== 'function') {
                 return false;
@@ -561,12 +586,13 @@
         // 渲染邮箱列表
         function renderAccountList(accounts) {
             const container = document.getElementById('accountList');
+            const isSearchMode = !!(document.getElementById('globalSearch')?.value || '').trim();
 
             if (accounts.length === 0) {
                 container.innerHTML = `
                     <div class="empty-state">
                         <div class="empty-state-icon">📭</div>
-                        <div class="empty-state-text">该分组暂无邮箱</div>
+                        <div class="empty-state-text">${isSearchMode ? '未找到匹配邮箱' : '该分组暂无邮箱'}</div>
                     </div>
                 `;
                 updateBatchActionBar();
@@ -600,6 +626,7 @@
                             ${acc.status === 'inactive' ? '<span class="account-status-pill muted">已停用</span>' : ''}
                             ${acc.last_refresh_status === 'failed' ? '<span class="account-status-pill danger">刷新失败</span>' : ''}
                         </div>
+                        ${renderAccountGroupSummary(acc, isSearchMode)}
                         ${renderAccountAliasSummary(acc.aliases)}
                         ${acc.remark && acc.remark.trim() ? `<div class="account-remark" title="${escapeHtml(acc.remark)}">${escapeHtml(acc.remark)}</div>` : ''}
                         ${(acc.tags || []).length ? `<div class="account-tags">${renderAccountTagSummary(acc.tags)}</div>` : ''}
@@ -734,6 +761,8 @@
                     <div class="empty-state-text">选择一封邮件查看详情</div>
                 </div>
             `;
+            showEmailList();
+            updateMobileContext();
         }
 
         function resetSelectedAccountViewIfDeleted(deletedEmails) {
@@ -886,59 +915,6 @@
                 importSelect.onchange = function () {
                     updateImportHint();
                 };
-            }
-        }
-
-        // 更新导入提示文本和渠道选择器
-        function updateImportHint() {
-            const importSelect = document.getElementById('importGroupSelect');
-            const hintEl = document.getElementById('importFormatHint');
-            const inputEl = document.getElementById('accountInput');
-            const channelGroup = document.getElementById('importChannelGroup');
-            const channelSelect = document.getElementById('importChannelSelect');
-            const exampleEl = document.getElementById('importFormatExample');
-            if (!importSelect || !hintEl || !inputEl) return;
-
-            const selectedGroup = groups.find(g => g.id === parseInt(importSelect.value));
-            const isTempGroup = selectedGroup && selectedGroup.name === '临时邮箱';
-
-            if (isTempGroup) {
-                // 显示渠道选择器
-                if (channelGroup) channelGroup.style.display = '';
-
-                const channel = channelSelect ? channelSelect.value : 'gptmail';
-                if (channel === 'duckmail') {
-                    hintEl.textContent = '格式：邮箱----密码，每行一个';
-                    inputEl.placeholder = '邮箱----密码';
-                    if (exampleEl) {
-                        exampleEl.style.display = '';
-                        exampleEl.textContent = '示例：\nuser@duck.com----mypassword\nuser2@duck.com----password2';
-                    }
-                } else if (channel === 'cloudflare') {
-                    hintEl.textContent = '格式：邮箱----JWT，每行一个';
-                    inputEl.placeholder = '邮箱----JWT';
-                    if (exampleEl) {
-                        exampleEl.style.display = '';
-                        exampleEl.textContent = '示例：\nuser@example.com----eyJhbGciOi...\nuser2@example.com----eyJ0eXAiOi...';
-                    }
-                } else {
-                    hintEl.textContent = '格式：每行一个邮箱地址';
-                    inputEl.placeholder = '每行一个邮箱地址';
-                    if (exampleEl) {
-                        exampleEl.style.display = '';
-                        exampleEl.textContent = '示例：\nuser1@gptmail.com\nuser2@gptmail.com';
-                    }
-                }
-            } else {
-                // 隐藏渠道选择器
-                if (channelGroup) channelGroup.style.display = 'none';
-                if (exampleEl) exampleEl.style.display = '';
-                hintEl.textContent = 'Outlook 支持两种格式并自动识别：邮箱----密码----client_id----refresh_token 或 邮箱----密码----refresh_token----client_id';
-                inputEl.placeholder = '邮箱----密码----client_id----refresh_token';
-                if (exampleEl) {
-                    exampleEl.textContent = '示例：\nuser@outlook.com----password123----24d9a0ed-8787-4584-883c-2fd79308940a----0.AXEA...\nuser@outlook.com----password123----0.AXEA...----24d9a0ed-8787-4584-883c-2fd79308940a';
-                }
-                return;
             }
         }
 
@@ -1294,4 +1270,3 @@
                 showToast('删除失败', 'error');
             }
         }
-

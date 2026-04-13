@@ -1,3 +1,14 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # These segmented files are executed into the shared `web_outlook_app`
+    # globals at runtime. Importing from the assembled module keeps IDE
+    # inspections from flagging the shared names as unresolved.
+    from web_outlook_app import *  # noqa: F403
+
+
 # ==================== OAuth Token API ====================
 
 @app.route('/api/oauth/auth-url', methods=['GET'])
@@ -129,7 +140,7 @@ def api_validate_cron():
 def api_get_settings():
     """获取所有设置"""
     settings = get_all_settings()
-    # 隐藏密码，仅返回掩码，不返回哈希值
+    # 隐藏密码的部分字符
     if 'login_password' in settings:
         settings.pop('login_password', None)
         settings['login_password_masked'] = '******'
@@ -168,7 +179,6 @@ def api_update_settings():
     updated = []
     errors = []
 
-    # 更新登录用户名
     if 'login_username' in data:
         new_username = str(data['login_username'] or '').strip()
         if not new_username:
@@ -176,7 +186,7 @@ def api_update_settings():
         elif len(new_username) < 3 or len(new_username) > 64:
             errors.append('登录用户名长度必须在 3-64 个字符之间')
         elif not re.fullmatch(r'[A-Za-z0-9_.@-]+', new_username):
-            errors.append('登录用户名仅支持字母、数字、._@-')
+            errors.append('登录用户名仅支持字母、数字、点、下划线、短横线和@')
         elif set_setting('login_username', new_username):
             updated.append('登录用户名')
         else:
@@ -451,11 +461,8 @@ def api_update_settings():
 @api_key_required
 def api_external_get_emails():
     """对外 API：通过 API Key 获取邮件列表"""
-    if 'api_external_get_emails_v2' in globals():
-        return api_external_get_emails_v2()
-
-    email_addr = request.args.get('email', '').strip()
-    folder = request.args.get('folder', 'inbox').strip().lower()
+    email_addr = get_query_arg_preserve_plus('email', '').strip()
+    folder = get_query_arg_preserve_plus('folder', 'inbox').strip().lower()
     try:
         skip = get_int_query_arg('skip', 0, minimum=0)
         top = get_int_query_arg('top', 20, minimum=1, maximum=50)
@@ -469,6 +476,10 @@ def api_external_get_emails():
     valid_folders = ['inbox', 'junkemail']
     if folder not in valid_folders:
         return jsonify({'success': False, 'error': f'folder 参数无效，支持: {", ".join(valid_folders)}'}), 400
+
+    # 限制分页大小
+    if top > 50:
+        top = 50
 
     account = get_account_by_email(email_addr)
     if not account:
@@ -489,21 +500,11 @@ def api_external_get_emails():
         skip,
         top,
         proxy_url,
-        fallback_proxy_urls
+        fallback_proxy_urls,
     )
     if graph_result.get('success'):
         emails = graph_result.get('emails', [])
-        formatted = []
-        for e in emails:
-            formatted.append({
-                'id': e.get('id'),
-                'subject': e.get('subject', '无主题'),
-                'from': e.get('from', {}).get('emailAddress', {}).get('address', '未知'),
-                'date': e.get('receivedDateTime', ''),
-                'is_read': e.get('isRead', False),
-                'has_attachments': e.get('hasAttachments', False),
-                'body_preview': e.get('bodyPreview', '')
-            })
+        formatted = [format_graph_email_item(e, folder) for e in emails]
         return jsonify({
             'success': True,
             'emails': formatted,

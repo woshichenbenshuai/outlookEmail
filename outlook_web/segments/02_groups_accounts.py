@@ -1,3 +1,14 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+if TYPE_CHECKING:
+    # These segmented files are executed into the shared `web_outlook_app`
+    # globals at runtime. Importing from the assembled module keeps IDE
+    # inspections from flagging the shared names as unresolved.
+    from web_outlook_app import *  # noqa: F403
+
+
 def get_cloudflare_admin_password() -> str:
     """获取 Cloudflare Temp Email 管理密码"""
     password = get_setting('cloudflare_admin_password')
@@ -108,15 +119,7 @@ def add_group(name: str, description: str = '', color: str = '#1a1a1a',
             )
             VALUES (?, ?, ?, ?, ?, ?, ?)
             ''',
-            (
-                name,
-                description,
-                color,
-                proxy_url or '',
-                fallback_proxy_url_1 or '',
-                fallback_proxy_url_2 or '',
-                999999,
-            )
+            (name, description, color, proxy_url or '', fallback_proxy_url_1 or '', fallback_proxy_url_2 or '', 999999)
         )
         group_id = cursor.lastrowid
         set_group_position(group_id, sort_position, db)
@@ -138,15 +141,7 @@ def update_group(group_id: int, name: str, description: str, color: str,
             UPDATE groups
             SET name = ?, description = ?, color = ?, proxy_url = ?, fallback_proxy_url_1 = ?, fallback_proxy_url_2 = ?
             WHERE id = ?
-        ''', (
-            name,
-            description,
-            color,
-            proxy_url or '',
-            fallback_proxy_url_1 or '',
-            fallback_proxy_url_2 or '',
-            group_id
-        ))
+        ''', (name, description, color, proxy_url or '', fallback_proxy_url_1 or '', fallback_proxy_url_2 or '', group_id))
         if not set_group_position(group_id, sort_position, db):
             return False
         db.commit()
@@ -812,6 +807,25 @@ def update_accounts_forwarding_by_ids(account_ids: List[int], forward_enabled: b
         return {'success': False, 'error': str(e)}
 
 
+def set_account_forward_cursor(account_id: int, cursor_value: Optional[str]) -> bool:
+    """设置账号转发游标。"""
+    db = get_db()
+    try:
+        db.execute(
+            '''
+            UPDATE accounts
+            SET forward_last_checked_at = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            ''',
+            (cursor_value, account_id)
+        )
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        return False
+
+
 # ==================== 工具函数 ====================
 
 def sanitize_input(text: str, max_length: int = 500) -> str:
@@ -1137,5 +1151,3 @@ def parse_account_import(account_str: str, account_format: str = 'client_id_refr
     if provider_key == 'outlook':
         return parse_outlook_account_string(account_str, account_format)
     return parse_imap_account_string(account_str, provider_key, imap_host, imap_port)
-
-

@@ -1,3 +1,5 @@
+        /* global accountsCache, closeMobilePanels, currentAccount, currentEmailDetail, currentEmailId, currentEmails, currentFolder, currentGroupId, currentMethod, currentSkip, emailListCache, handleApiError, hasMoreEmails, hideModal, isTempEmailGroup, loadAccountsByGroup, loadEmails, loadGroups, renderEmailList, setModalVisible, showEmailList, showToast, updateImportHint, updateMobileContext */
+
         // ==================== 账号相关 ====================
 
         // 选择账号
@@ -10,6 +12,9 @@
 
             document.getElementById('currentAccount').classList.add('show');
             document.getElementById('currentAccountEmail').textContent = email;
+            showEmailList();
+            closeMobilePanels();
+            updateMobileContext();
 
             document.querySelectorAll('.account-item').forEach(item => {
                 item.classList.remove('active');
@@ -263,6 +268,8 @@
                                 <div class="empty-state-text">选择一封邮件查看详情</div>
                             </div>
                         `;
+                        showEmailList();
+                        updateMobileContext();
                     }
 
                     // 刷新分组列表
@@ -490,4 +497,3 @@
                 showToast('导出失败', 'error');
             }
         }
-

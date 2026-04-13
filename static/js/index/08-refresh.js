@@ -1,3 +1,5 @@
+        /* global closeAccountActionMenus, closeFullscreenEmail, closeMobilePanels, closeNavbarActionsMenu, closeTagFilterDropdown, escapeHtml, formatDate, handleApiError, hideModal, showEditAccountModal, showModal, showToast, updateModalBodyState */
+
         // ==================== Token 刷新管理 ====================
 
         // 显示刷新模态框
@@ -575,16 +577,11 @@
             updateModalBodyState();
         }
 
-        // HTML 转义
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-        }
-
         // 键盘快捷键
         document.addEventListener('keydown', function (e) {
             if (e.key === 'Escape') {
+                closeNavbarActionsMenu();
+                closeMobilePanels();
                 closeAccountActionMenus();
                 closeTagFilterDropdown();
                 closeAllModals();
