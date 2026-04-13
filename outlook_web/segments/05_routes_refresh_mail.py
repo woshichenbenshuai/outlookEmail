@@ -45,13 +45,13 @@ def log_forwarding_result(account_id: int, account_email: str, message_id: str, 
         return False
 
 
-def test_refresh_token(client_id: str, refresh_token: str, proxy_url: str = None) -> tuple[bool, str]:
+def test_refresh_token(client_id: str, refresh_token: str, proxy_url: str = None,
+                       fallback_proxy_urls: List[str] = None) -> tuple[bool, str]:
     """测试 refresh token 是否有效，返回 (是否成功, 错误信息)"""
     try:
         # 尝试使用 Graph API 获取 access token
         # 使用与 get_access_token_graph 相同的 scope，确保一致性
-        proxies = build_proxies(proxy_url)
-        res = requests.post(
+        res = post_with_proxy_fallback(
             TOKEN_URL_GRAPH,
             data={
                 "client_id": client_id,
@@ -60,7 +60,8 @@ def test_refresh_token(client_id: str, refresh_token: str, proxy_url: str = None
                 "scope": "https://graph.microsoft.com/.default"
             },
             timeout=30,
-            proxies=proxies
+            proxy_url=proxy_url,
+            fallback_proxy_urls=fallback_proxy_urls
         )
 
         if res.status_code == 200:
@@ -81,11 +82,9 @@ def refresh_outlook_account_token(account: sqlite3.Row, refresh_type: str = 'man
     encrypted_refresh_token = account['refresh_token']
 
     # 获取分组代理设置
-    proxy_url = ''
-    if account['group_id']:
-        group = get_group_by_id(account['group_id'])
-        if group:
-            proxy_url = group.get('proxy_url', '') or ''
+    proxy_config = get_account_proxy_config(dict(account))
+    proxy_url = proxy_config.get('proxy_url', '') or ''
+    fallback_proxy_urls = get_account_proxy_failover_urls(dict(account))
 
     # 解密 refresh_token
     try:
@@ -105,7 +104,7 @@ def refresh_outlook_account_token(account: sqlite3.Row, refresh_type: str = 'man
             )
         }
 
-    success, error_msg = test_refresh_token(client_id, refresh_token, proxy_url)
+    success, error_msg = test_refresh_token(client_id, refresh_token, proxy_url, fallback_proxy_urls)
     sanitized_error = sanitize_error_details(error_msg) if error_msg else ''
 
     # 记录刷新结果
@@ -318,15 +317,20 @@ def api_refresh_all_accounts():
 
                 # 获取分组代理设置
                 proxy_url = ''
+                fallback_proxy_urls = ['', '']
                 group_id = account['group_id']
                 if group_id:
-                    group_cursor = conn.execute('SELECT proxy_url FROM groups WHERE id = ?', (group_id,))
+                    group_cursor = conn.execute(
+                        'SELECT proxy_url, fallback_proxy_url_1, fallback_proxy_url_2 FROM groups WHERE id = ?',
+                        (group_id,)
+                    )
                     group_row = group_cursor.fetchone()
                     if group_row:
                         proxy_url = group_row['proxy_url'] or ''
+                        fallback_proxy_urls = get_group_proxy_failover_urls(dict(group_row))
 
                 # 测试 refresh token
-                success, error_msg = test_refresh_token(client_id, refresh_token, proxy_url)
+                success, error_msg = test_refresh_token(client_id, refresh_token, proxy_url, fallback_proxy_urls)
 
                 # 记录刷新结果（使用当前连接）
                 try:
@@ -844,9 +848,10 @@ def api_get_refresh_stats():
 
 # ==================== Email Deletion Helpers ====================
 
-def delete_emails_graph(client_id: str, refresh_token: str, message_ids: List[str], proxy_url: str = None) -> Dict[str, Any]:
+def delete_emails_graph(client_id: str, refresh_token: str, message_ids: List[str],
+                        proxy_url: str = None, fallback_proxy_urls: List[str] = None) -> Dict[str, Any]:
     """通过 Graph API 批量删除邮件（永久删除）"""
-    access_token = get_access_token_graph(client_id, refresh_token, proxy_url)
+    access_token = get_access_token_graph(client_id, refresh_token, proxy_url, fallback_proxy_urls)
     if not access_token:
         return {"success": False, "error": "获取 Access Token 失败"}
 
@@ -878,13 +883,14 @@ def delete_emails_graph(client_id: str, refresh_token: str, message_ids: List[st
             })
         
         try:
-            proxies = build_proxies(proxy_url)
-            response = requests.post(
+            response = request_with_proxy_failover(
+                'post',
                 "https://graph.microsoft.com/v1.0/$batch",
                 headers=headers,
                 json={"requests": batch_requests},
                 timeout=30,
-                proxies=proxies
+                proxy_url=proxy_url,
+                fallback_proxy_urls=fallback_proxy_urls
             )
             
             if response.status_code == 200:
@@ -912,9 +918,9 @@ def delete_emails_graph(client_id: str, refresh_token: str, message_ids: List[st
     }
 
 def delete_emails_imap(email_addr: str, client_id: str, refresh_token: str, message_ids: List[str], server: str,
-                       proxy_url: str = None) -> Dict[str, Any]:
+                       proxy_url: str = None, fallback_proxy_urls: List[str] = None) -> Dict[str, Any]:
     """通过 IMAP 删除邮件（永久删除）"""
-    access_token = get_access_token_graph(client_id, refresh_token, proxy_url)
+    access_token = get_access_token_graph(client_id, refresh_token, proxy_url, fallback_proxy_urls)
     if not access_token:
         return {"success": False, "error": "获取 Access Token 失败"}
         
@@ -1052,7 +1058,7 @@ def merge_folder_results(results: Dict[str, Dict[str, Any]], skip: int, top: int
 
 
 def fetch_account_folder_emails(account: Dict[str, Any], folder: str, skip: int, top: int,
-                                proxy_url: str = '') -> Dict[str, Any]:
+                                proxy_url: str = '', fallback_proxy_urls: List[str] = None) -> Dict[str, Any]:
     folder_name = normalize_folder_name(folder)
     if folder_name not in VALID_MAIL_FOLDERS or folder_name == 'all':
         return {
@@ -1086,7 +1092,15 @@ def fetch_account_folder_emails(account: Dict[str, Any], folder: str, skip: int,
         }
 
     all_errors = {}
-    graph_result = get_emails_graph(account['client_id'], account['refresh_token'], folder_name, skip, top, proxy_url)
+    graph_result = get_emails_graph(
+        account['client_id'],
+        account['refresh_token'],
+        folder_name,
+        skip,
+        top,
+        proxy_url,
+        fallback_proxy_urls
+    )
     if graph_result.get('success'):
         return {
             'success': True,
@@ -1112,7 +1126,8 @@ def fetch_account_folder_emails(account: Dict[str, Any], folder: str, skip: int,
         skip,
         top,
         IMAP_SERVER_NEW,
-        proxy_url
+        proxy_url,
+        fallback_proxy_urls
     )
     if imap_new_result.get('success'):
         return {
@@ -1131,7 +1146,8 @@ def fetch_account_folder_emails(account: Dict[str, Any], folder: str, skip: int,
         skip,
         top,
         IMAP_SERVER_OLD,
-        proxy_url
+        proxy_url,
+        fallback_proxy_urls
     )
     if imap_old_result.get('success'):
         return {
@@ -1151,6 +1167,7 @@ def fetch_account_folder_emails(account: Dict[str, Any], folder: str, skip: int,
 
 def fetch_account_emails(account: Dict[str, Any], folder: str, skip: int, top: int) -> Dict[str, Any]:
     proxy_url = get_account_proxy_url(account)
+    fallback_proxy_urls = get_account_proxy_failover_urls(account)
     folder_name = normalize_folder_name(folder)
     if folder_name not in VALID_MAIL_FOLDERS:
         return {
@@ -1162,14 +1179,14 @@ def fetch_account_emails(account: Dict[str, Any], folder: str, skip: int, top: i
         merged_top = max(1, min(100, top * 2))
         return merge_folder_results(
             {
-                'inbox': fetch_account_folder_emails(account, 'inbox', skip, top, proxy_url),
-                'junkemail': fetch_account_folder_emails(account, 'junkemail', skip, top, proxy_url),
+                'inbox': fetch_account_folder_emails(account, 'inbox', skip, top, proxy_url, fallback_proxy_urls),
+                'junkemail': fetch_account_folder_emails(account, 'junkemail', skip, top, proxy_url, fallback_proxy_urls),
             },
             0,
             merged_top
         )
 
-    return fetch_account_folder_emails(account, folder_name, skip, top, proxy_url)
+    return fetch_account_folder_emails(account, folder_name, skip, top, proxy_url, fallback_proxy_urls)
 
 
 @app.route('/api/emails/<email_addr>')
@@ -1227,12 +1244,13 @@ def api_delete_emails():
         return jsonify({'success': False, 'error': '账号不存在'})
 
     proxy_url = get_account_proxy_url(account)
+    fallback_proxy_urls = get_account_proxy_failover_urls(account)
 
     # 1. 优先尝试 Graph API
     if account.get('account_type') == 'imap':
         return jsonify({'success': False, 'error': 'IMAP 账号暂不支持批量删除邮件'})
 
-    graph_res = delete_emails_graph(account['client_id'], account['refresh_token'], message_ids, proxy_url)
+    graph_res = delete_emails_graph(account['client_id'], account['refresh_token'], message_ids, proxy_url, fallback_proxy_urls)
     if graph_res['success']:
         return jsonify(graph_res)
 
@@ -1242,12 +1260,28 @@ def api_delete_emails():
         return jsonify(graph_res)
     
     # 2. 尝试 IMAP 回退（新服务器）
-    imap_res = delete_emails_imap(account['email'], account['client_id'], account['refresh_token'], message_ids, IMAP_SERVER_NEW, proxy_url)
+    imap_res = delete_emails_imap(
+        account['email'],
+        account['client_id'],
+        account['refresh_token'],
+        message_ids,
+        IMAP_SERVER_NEW,
+        proxy_url,
+        fallback_proxy_urls
+    )
     if imap_res['success']:
         return jsonify(imap_res)
 
     # 3. 尝试 IMAP 回退（旧服务器）
-    imap_old_res = delete_emails_imap(account['email'], account['client_id'], account['refresh_token'], message_ids, IMAP_SERVER_OLD, proxy_url)
+    imap_old_res = delete_emails_imap(
+        account['email'],
+        account['client_id'],
+        account['refresh_token'],
+        message_ids,
+        IMAP_SERVER_OLD,
+        proxy_url,
+        fallback_proxy_urls
+    )
     if imap_old_res['success']:
         return jsonify(imap_old_res)
 
@@ -1268,6 +1302,7 @@ def api_get_email_detail(email_addr, message_id):
     method = request.args.get('method', 'graph')
     folder = normalize_folder_name(request.args.get('folder', 'inbox'))
     proxy_url = get_account_proxy_url(account)
+    fallback_proxy_urls = get_account_proxy_failover_urls(account)
 
     if account.get('account_type') == 'imap':
         detail_result = get_email_detail_imap_generic_result(
@@ -1285,7 +1320,13 @@ def api_get_email_detail(email_addr, message_id):
         return jsonify({'success': False, 'error': detail_result.get('error', '获取邮件详情失败')})
 
     if method == 'graph':
-        detail = get_email_detail_graph(account['client_id'], account['refresh_token'], message_id, proxy_url)
+        detail = get_email_detail_graph(
+            account['client_id'],
+            account['refresh_token'],
+            message_id,
+            proxy_url,
+            fallback_proxy_urls
+        )
         if detail:
             return jsonify({
                 'success': True,
@@ -1302,7 +1343,15 @@ def api_get_email_detail(email_addr, message_id):
             })
 
     # 如果 Graph API 失败，尝试 IMAP
-    detail = get_email_detail_imap(account['email'], account['client_id'], account['refresh_token'], message_id, folder, proxy_url)
+    detail = get_email_detail_imap(
+        account['email'],
+        account['client_id'],
+        account['refresh_token'],
+        message_id,
+        folder,
+        proxy_url,
+        fallback_proxy_urls
+    )
     if detail:
         return jsonify({'success': True, 'email': detail})
 

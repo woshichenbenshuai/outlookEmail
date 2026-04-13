@@ -394,5 +394,51 @@ class BatchForwardingApiTests(unittest.TestCase):
         self.assertEqual(enabled_account['forward_last_checked_at'], self.enabled_cursor_before)
 
 
+class ProxyFailoverTests(unittest.TestCase):
+    def setUp(self):
+        self.app = web_outlook_app.app
+        self.app.config['TESTING'] = True
+        self.client = self.app.test_client()
+        with self.client.session_transaction() as sess:
+            sess['logged_in'] = True
+
+    def test_proxy_failover_candidates_normalize_direct_and_deduplicate(self):
+        candidates = web_outlook_app.get_proxy_failover_candidates(
+            'socks5://127.0.0.1:1080',
+            ['direct', '直连', 'socks5://127.0.0.1:1080', 'http://127.0.0.1:7890']
+        )
+
+        self.assertEqual([item[1] for item in candidates], [
+            'socks5://127.0.0.1:1080',
+            web_outlook_app.DIRECT_PROXY_SENTINEL,
+            'http://127.0.0.1:7890',
+        ])
+
+    def test_group_api_persists_proxy_failover_fields(self):
+        create_resp = self.client.post(
+            '/api/groups',
+            json={
+                'name': '代理回退测试组',
+                'description': '用于测试代理回退字段',
+                'color': '#225588',
+                'proxy_url': 'socks5://127.0.0.1:1080',
+                'fallback_proxy_url_1': 'http://127.0.0.1:7891',
+                'fallback_proxy_url_2': 'direct',
+                'sort_position': 1
+            }
+        )
+        self.assertEqual(create_resp.status_code, 200)
+        create_payload = create_resp.get_json()
+        self.assertTrue(create_payload['success'])
+        group_id = create_payload['group_id']
+
+        get_resp = self.client.get(f'/api/groups/{group_id}')
+        self.assertEqual(get_resp.status_code, 200)
+        payload = get_resp.get_json()
+        self.assertTrue(payload['success'])
+        self.assertEqual(payload['group'].get('fallback_proxy_url_1'), 'http://127.0.0.1:7891')
+        self.assertEqual(payload['group'].get('fallback_proxy_url_2'), 'direct')
+
+
 if __name__ == '__main__':
     unittest.main()

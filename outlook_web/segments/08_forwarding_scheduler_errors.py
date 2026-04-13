@@ -197,7 +197,8 @@ def build_forward_payload(account: Dict[str, Any], email_detail: Dict[str, Any])
 
 def fetch_forward_candidates(account: Dict[str, Any], top: int = 20, folder: str = 'inbox') -> List[Dict[str, Any]]:
     proxy_url = get_account_proxy_url(account)
-    result = fetch_account_folder_emails(account, folder, 0, top, proxy_url)
+    fallback_proxy_urls = get_account_proxy_failover_urls(account)
+    result = fetch_account_folder_emails(account, folder, 0, top, proxy_url, fallback_proxy_urls)
     if not result.get('success'):
         return []
     return result.get('emails', [])
@@ -205,6 +206,7 @@ def fetch_forward_candidates(account: Dict[str, Any], top: int = 20, folder: str
 
 def fetch_forward_detail(account: Dict[str, Any], message_id: str, folder: str = 'inbox') -> Optional[Dict[str, Any]]:
     proxy_url = get_account_proxy_url(account)
+    fallback_proxy_urls = get_account_proxy_failover_urls(account)
     if account.get('account_type') == 'imap':
         result = get_email_detail_imap_generic_result(
             account['email'],
@@ -218,7 +220,13 @@ def fetch_forward_detail(account: Dict[str, Any], message_id: str, folder: str =
         )
         return result.get('email') if result.get('success') else None
 
-    detail = get_email_detail_graph(account.get('client_id', ''), account.get('refresh_token', ''), message_id, proxy_url)
+    detail = get_email_detail_graph(
+        account.get('client_id', ''),
+        account.get('refresh_token', ''),
+        message_id,
+        proxy_url,
+        fallback_proxy_urls
+    )
     if not detail:
         return None
     return {
@@ -741,14 +749,19 @@ def trigger_refresh_internal():
 
             # 获取分组代理设置
             proxy_url = ''
+            fallback_proxy_urls = ['', '']
             group_id = account['group_id']
             if group_id:
-                group_cursor = conn.execute('SELECT proxy_url FROM groups WHERE id = ?', (group_id,))
+                group_cursor = conn.execute(
+                    'SELECT proxy_url, fallback_proxy_url_1, fallback_proxy_url_2 FROM groups WHERE id = ?',
+                    (group_id,)
+                )
                 group_row = group_cursor.fetchone()
                 if group_row:
                     proxy_url = group_row['proxy_url'] or ''
+                    fallback_proxy_urls = get_group_proxy_failover_urls(dict(group_row))
 
-            success, error_msg = test_refresh_token(client_id, refresh_token, proxy_url)
+            success, error_msg = test_refresh_token(client_id, refresh_token, proxy_url, fallback_proxy_urls)
 
             conn.execute('''
                 INSERT INTO account_refresh_logs (account_id, account_email, refresh_type, status, error_message)
@@ -967,6 +980,7 @@ def email_matches_filters(account: Dict[str, Any], item: Dict[str, Any],
         return True
 
     proxy_url = get_account_proxy_url(account)
+    fallback_proxy_urls = get_account_proxy_failover_urls(account)
     if account.get('account_type') == 'imap':
         detail_payload = get_email_detail_imap_generic_result(
             account['email'],
@@ -987,7 +1001,8 @@ def email_matches_filters(account: Dict[str, Any], item: Dict[str, Any],
         account.get('client_id', ''),
         account.get('refresh_token', ''),
         str(item.get('id', '')),
-        proxy_url
+        proxy_url,
+        fallback_proxy_urls
     )
     if not detail:
         return False
