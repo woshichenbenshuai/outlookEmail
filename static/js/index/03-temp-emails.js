@@ -1,4 +1,4 @@
-        /* global accountsCache, closeMobilePanels, currentAccount, currentEmailDetail, currentEmailId, currentEmails, currentMethod, currentGroupId, escapeHtml, formatDate, groups, handleApiError, loadGroups, loadTempEmails, renderEmailDetail, renderEmailList, showEmailList, showMobileEmailDetail, showToast, updateMobileContext, updateCurrentGroupHeader */
+        /* global accountsCache, closeMobilePanels, currentAccount, currentAccountListSource, currentEmailDetail, currentEmailId, currentEmails, currentMethod, currentGroupId, escapeHtml, escapeJs, formatDate, groups, handleApiError, loadGroups, loadTempEmails, matchesSelectedTagFilters, refreshEmails, renderAccountTagSummary, renderEmailDetail, renderEmailList, renderEmptyStateMarkup, selectedTagFilters, showEmailList, showMobileEmailDetail, showToast, updateBatchActionBar, updateMobileContext, updateCurrentGroupHeader */
 
         // ==================== 临时邮箱相关 ====================
 
@@ -26,37 +26,77 @@
                         group.account_count = data.emails.length;
                         renderGroupList(groups);
                     }
+                } else {
+                    container.innerHTML = renderEmptyStateMarkup('⚠️', data.error || '加载失败', {
+                        onAction: 'loadTempEmails(true)',
+                        actionTitle: '刷新临时邮箱列表'
+                    });
                 }
             } catch (error) {
-                container.innerHTML = '<div class="empty-state"><div class="empty-state-text">加载失败</div></div>';
+                container.innerHTML = renderEmptyStateMarkup('⚠️', '加载失败', {
+                    onAction: 'loadTempEmails(true)',
+                    actionTitle: '刷新临时邮箱列表'
+                });
             }
         }
 
         // 渲染临时邮箱列表
         function renderTempEmailList(emails) {
             const container = document.getElementById('accountList');
-            currentAccountListSource = [];
+            currentAccountListSource = Array.isArray(emails) ? [...emails] : [];
 
             // 渠道筛选
             const filter = localStorage.getItem('outlook_temp_email_filter') || 'all';
-            const filtered = filter === 'all' ? emails : emails.filter(e => e.provider === filter);
+            const searchQuery = (document.getElementById('globalSearch')?.value || '').trim().toLowerCase();
+            let filtered = filter === 'all'
+                ? [...currentAccountListSource]
+                : currentAccountListSource.filter(e => e.provider === filter);
+
+            if (searchQuery) {
+                filtered = filtered.filter(email => {
+                    const emailText = String(email.email || '').toLowerCase();
+                    const tagText = Array.isArray(email.tags)
+                        ? email.tags.map(tag => String(tag.name || '')).join('\n').toLowerCase()
+                        : '';
+                    return emailText.includes(searchQuery) || tagText.includes(searchQuery);
+                });
+            }
+
+            if (selectedTagFilters.size > 0) {
+                filtered = filtered.filter(email => matchesSelectedTagFilters(email.tags));
+            }
+
+            const currentGroup = groups.find(group => group.id === currentGroupId);
+            if (searchQuery) {
+                updateCurrentGroupHeader(null, `搜索结果 (${filtered.length})`);
+            } else if (currentGroup) {
+                updateCurrentGroupHeader(currentGroup);
+            }
 
             if (filtered.length === 0) {
                 const providerName = filter === 'duckmail' ? 'DuckMail' : (filter === 'cloudflare' ? 'Cloudflare' : 'GPTMail');
-                const hint = filter === 'all' ? '暂无临时邮箱<br>点击下方按钮生成' : `暂无 ${providerName} 邮箱`;
-                container.innerHTML = `
-                    <div class="empty-state">
-                        <div class="empty-state-icon">⚡</div>
-                        <div class="empty-state-text">${hint}</div>
-                    </div>
-                `;
+                const hasAdvancedFilters = !!searchQuery || selectedTagIds.length > 0;
+                const hint = hasAdvancedFilters
+                    ? '未找到匹配的临时邮箱'
+                    : (filter === 'all' ? '暂无临时邮箱<br>点击下方按钮生成' : `暂无 ${providerName} 邮箱`);
+                container.innerHTML = renderEmptyStateMarkup('⚡', hint, {
+                    allowHtml: !hasAdvancedFilters,
+                    onAction: 'loadTempEmails(true)',
+                    actionTitle: '刷新临时邮箱列表'
+                });
+                updateBatchActionBar();
                 return;
             }
 
             container.innerHTML = filtered.map(email => `
                 <div class="account-item ${currentAccount === email.email ? 'active' : ''}"
                      onclick="handleAccountItemClick(event, '${escapeJs(email.email)}', true)">
-                    <div class="account-leading-icon">⚡</div>
+                    <input type="checkbox" class="account-select-checkbox" value="${email.id}"
+                           data-account-email="${escapeHtml(email.email)}"
+                           data-account-type="temp-email"
+                           data-refreshable="false"
+                           data-forward-enabled="false"
+                           onclick="event.stopPropagation(); updateBatchActionBar()">
                     <div class="account-body">
                         <div class="account-title-row">
                             <div class="account-email-wrap">
@@ -70,6 +110,7 @@
                             </span>
                             <span class="account-status-pill muted">临时邮箱</span>
                         </div>
+                        ${(email.tags || []).length ? `<div class="account-tags">${renderAccountTagSummary(email.tags)}</div>` : ''}
                     </div>
                     <div class="account-menu-wrap">
                         <button class="account-menu-trigger" type="button" data-account-menu-toggle="true" title="更多操作">⋯</button>
@@ -102,7 +143,7 @@
                 modal = document.createElement('div');
                 modal.id = 'tempEmailProviderModal';
                 modal.className = 'modal';
-                modal.onclick = function (e) { if (e.target === modal) hideTempEmailProviderModal(); };
+                modal.onmousedown = function (e) { if (e.target === modal) hideTempEmailProviderModal(); };
                 modal.innerHTML = `
                     <div class="modal-content" style="width: 460px;">
                         <div class="modal-header">
@@ -380,7 +421,7 @@
 
         // 清空临时邮箱的所有邮件
         async function clearTempEmailMessages(email) {
-            if (!confirm(`确定要清空临时邮箱 ${email} 的所有邮件吗？`)) {
+            if (!(await showConfirmModal(`确定要清空临时邮箱 ${email} 的所有邮件吗？`, { title: '清空邮件', confirmText: '确认清空' }))) {
                 return;
             }
 
@@ -422,7 +463,7 @@
 
         // 删除临时邮箱
         async function deleteTempEmail(email) {
-            if (!confirm(`确定要删除临时邮箱 ${email} 吗？\n该邮箱的所有邮件也将被删除。`)) {
+            if (!(await showConfirmModal(`确定要删除临时邮箱 ${email} 吗？\n该邮箱的所有邮件也将被删除。`, { title: '删除临时邮箱', confirmText: '确认删除' }))) {
                 return;
             }
 
@@ -503,20 +544,16 @@
                     renderEmailList(data.emails);
                 } else {
                     handleApiError(data, '加载临时邮件失败');
-                    container.innerHTML = `
-                        <div class="empty-state">
-                            <div class="empty-state-icon">⚠️</div>
-                            <div class="empty-state-text">${data.error && data.error.message ? data.error.message : '加载失败'}</div>
-                        </div>
-                    `;
+                    container.innerHTML = renderEmptyStateMarkup('⚠️', data.error && data.error.message ? data.error.message : '加载失败', {
+                        onAction: 'refreshEmails()',
+                        actionTitle: '刷新邮件列表'
+                    });
                 }
             } catch (error) {
-                container.innerHTML = `
-                    <div class="empty-state">
-                        <div class="empty-state-icon">⚠️</div>
-                        <div class="empty-state-text">网络错误，请重试</div>
-                    </div>
-                `;
+                container.innerHTML = renderEmptyStateMarkup('⚠️', '网络错误，请重试', {
+                    onAction: 'refreshEmails()',
+                    actionTitle: '刷新邮件列表'
+                });
             } finally {
                 // 启用按钮
                 if (refreshBtn) {

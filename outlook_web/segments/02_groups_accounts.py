@@ -219,6 +219,31 @@ def load_accounts(group_id: int = None) -> List[Dict]:
     return accounts
 
 
+def normalize_account_sort_order(sort_order: Any, default: int = 0) -> int:
+    try:
+        value = int(sort_order)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def parse_account_sort_order_input(sort_order: Any) -> Optional[int]:
+    if sort_order in (None, ''):
+        return None
+    try:
+        value = int(sort_order)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def normalize_account_refresh_status(status: Any) -> str:
+    normalized = str(status or '').strip().lower()
+    if normalized in {'success', 'failed', 'never'}:
+        return normalized
+    return 'never'
+
+
 # ==================== 标签管理 ====================
 
 def get_tags() -> List[Dict]:
@@ -447,6 +472,37 @@ def resolve_account_by_address(email_addr: str) -> Optional[Dict]:
     return resolve_account_record(alias_row, matched_alias=alias_row['matched_alias'])
 
 
+def build_plus_fallback_emails(email_addr: str) -> List[str]:
+    normalized = normalize_email_address(email_addr)
+    if not normalized or '@' not in normalized:
+        return []
+
+    local_part, domain = normalized.split('@', 1)
+    segments = [segment for segment in local_part.split('+') if segment]
+    if len(segments) <= 1:
+        return []
+
+    # 从右往左逐级回退，优先保留更长的别名形式。
+    fallbacks = []
+    for size in range(len(segments) - 1, 0, -1):
+        candidate = f"{'+'.join(segments[:size])}@{domain}"
+        if candidate != normalized and candidate not in fallbacks:
+            fallbacks.append(candidate)
+    return fallbacks
+
+
+def resolve_account_for_email_api(email_addr: str) -> Optional[Dict]:
+    account = resolve_account_by_address(email_addr)
+    if account:
+        return account
+
+    for fallback_email in build_plus_fallback_emails(email_addr):
+        account = resolve_account_by_address(fallback_email)
+        if account:
+            return account
+    return None
+
+
 def get_account_proxy_url(account: Optional[Dict[str, Any]]) -> str:
     proxy_config = get_account_proxy_config(account)
     return proxy_config.get('proxy_url', '') or ''
@@ -533,11 +589,42 @@ def get_latest_account_refresh_log(account_id: int, db=None) -> Optional[Dict[st
     return dict(row) if row else None
 
 
+def resolve_account_refresh_state(account: Dict[str, Any],
+                                  last_refresh_log: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    status = normalize_account_refresh_status(account.get('last_refresh_status'))
+    refresh_error = account.get('last_refresh_error')
+    refresh_at = account.get('last_refresh_at', '')
+
+    if last_refresh_log is None and account.get('id') and (
+        status == 'never' or not refresh_at or (status == 'failed' and not refresh_error)
+    ):
+        try:
+            last_refresh_log = get_latest_account_refresh_log(account['id'])
+        except Exception:
+            last_refresh_log = None
+
+    if last_refresh_log and status == 'never':
+        status = normalize_account_refresh_status(last_refresh_log.get('status'))
+    if last_refresh_log and not refresh_at:
+        refresh_at = last_refresh_log.get('created_at', '')
+    if status == 'failed':
+        refresh_error = refresh_error or (last_refresh_log.get('error_message') if last_refresh_log else None)
+    else:
+        refresh_error = None
+
+    return {
+        'last_refresh_at': refresh_at or '',
+        'last_refresh_status': status,
+        'last_refresh_error': refresh_error or None,
+    }
+
+
 def serialize_account_summary(account: Dict[str, Any], last_refresh_log: Optional[Dict[str, Any]] = None,
                               include_client_meta: bool = True,
                               include_imap_meta: bool = True) -> Dict[str, Any]:
     """序列化账号摘要，默认隐藏敏感字段"""
     client_id = account.get('client_id') or ''
+    refresh_state = resolve_account_refresh_state(account, last_refresh_log)
     payload = {
         'id': account['id'],
         'email': account['email'],
@@ -546,14 +633,15 @@ def serialize_account_summary(account: Dict[str, Any], last_refresh_log: Optiona
         'group_id': account.get('group_id'),
         'group_name': account.get('group_name', '默认分组'),
         'group_color': account.get('group_color', '#666666'),
+        'sort_order': normalize_account_sort_order(account.get('sort_order', 0)),
         'remark': account.get('remark', ''),
         'status': account.get('status', 'active'),
         'account_type': account.get('account_type', 'outlook'),
         'provider': account.get('provider', 'outlook'),
         'forward_enabled': bool(account.get('forward_enabled')),
-        'last_refresh_at': account.get('last_refresh_at', ''),
-        'last_refresh_status': last_refresh_log['status'] if last_refresh_log else None,
-        'last_refresh_error': last_refresh_log['error_message'] if last_refresh_log else None,
+        'last_refresh_at': refresh_state['last_refresh_at'],
+        'last_refresh_status': refresh_state['last_refresh_status'],
+        'last_refresh_error': refresh_state['last_refresh_error'],
         'created_at': account.get('created_at', ''),
         'updated_at': account.get('updated_at', ''),
         'tags': account.get('tags', [])
@@ -571,7 +659,8 @@ def serialize_account_summary(account: Dict[str, Any], last_refresh_log: Optiona
 def add_account(email_addr: str, password: str, client_id: str = '', refresh_token: str = '',
                 group_id: int = 1, remark: str = '', account_type: str = 'outlook',
                 provider: str = 'outlook', imap_host: str = '', imap_port: int = 993,
-                imap_password: str = '', forward_enabled: bool = False) -> bool:
+                imap_password: str = '', forward_enabled: bool = False,
+                sort_order: Optional[int] = None) -> bool:
     """添加邮箱账号"""
     db = get_db()
     try:
@@ -590,16 +679,17 @@ def add_account(email_addr: str, password: str, client_id: str = '', refresh_tok
         account_type = account_type or provider_meta.get('account_type', 'outlook')
         imap_host = imap_host or provider_meta.get('imap_host', '')
         imap_port = int(imap_port or provider_meta.get('imap_port', 993) or 993)
+        normalized_sort_order = parse_account_sort_order_input(sort_order)
 
         db.execute('''
             INSERT INTO accounts (
-                email, password, client_id, refresh_token, group_id, remark,
+                email, password, client_id, refresh_token, group_id, sort_order, remark,
                 account_type, provider, imap_host, imap_port, imap_password, forward_enabled,
                 forward_last_checked_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
-            email_addr, encrypted_password, client_id, encrypted_refresh_token, group_id, remark,
+            email_addr, encrypted_password, client_id, encrypted_refresh_token, group_id, normalized_sort_order, remark,
             account_type, provider, imap_host, imap_port, encrypted_imap_password, 1 if forward_enabled else 0,
             datetime.now(timezone.utc).isoformat() if forward_enabled else None
         ))
@@ -610,7 +700,7 @@ def add_account(email_addr: str, password: str, client_id: str = '', refresh_tok
 
 
 def update_account(account_id: int, email_addr: str, password: str, client_id: str,
-                   refresh_token: str, group_id: int, remark: str, status: str,
+                   refresh_token: str, group_id: int, sort_order: Optional[int], remark: str, status: str,
                    account_type: str = 'outlook', provider: str = 'outlook',
                    imap_host: str = '', imap_port: int = 993, imap_password: str = '',
                    forward_enabled: bool = False) -> bool:
@@ -621,6 +711,7 @@ def update_account(account_id: int, email_addr: str, password: str, client_id: s
         encrypted_password = encrypt_data(password) if password else password
         encrypted_refresh_token = encrypt_data(refresh_token) if refresh_token else refresh_token
         encrypted_imap_password = encrypt_data(imap_password) if imap_password else imap_password
+        normalized_sort_order = parse_account_sort_order_input(sort_order)
 
         current_account = db.execute(
             'SELECT forward_enabled, forward_last_checked_at FROM accounts WHERE id = ?',
@@ -634,12 +725,13 @@ def update_account(account_id: int, email_addr: str, password: str, client_id: s
             db.execute('''
                 UPDATE accounts
                 SET email = ?, password = ?, client_id = ?, refresh_token = ?,
-                    group_id = ?, remark = ?, status = ?, account_type = ?, provider = ?,
+                    group_id = ?, sort_order = ?, remark = ?, status = ?, account_type = ?, provider = ?,
                     imap_host = ?, imap_port = ?, imap_password = ?, forward_enabled = ?,
                     forward_last_checked_at = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
             ''', (
-                email_addr, encrypted_password, client_id, encrypted_refresh_token, group_id, remark, status,
+                email_addr, encrypted_password, client_id, encrypted_refresh_token, group_id, normalized_sort_order,
+                remark, status,
                 account_type, provider, imap_host, imap_port, encrypted_imap_password, 1,
                 datetime.now(timezone.utc).isoformat(), account_id
             ))
@@ -647,12 +739,13 @@ def update_account(account_id: int, email_addr: str, password: str, client_id: s
             db.execute('''
                 UPDATE accounts
                 SET email = ?, password = ?, client_id = ?, refresh_token = ?,
-                    group_id = ?, remark = ?, status = ?, account_type = ?, provider = ?,
+                    group_id = ?, sort_order = ?, remark = ?, status = ?, account_type = ?, provider = ?,
                     imap_host = ?, imap_port = ?, imap_password = ?, forward_enabled = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
             ''', (
-                email_addr, encrypted_password, client_id, encrypted_refresh_token, group_id, remark, status,
+                email_addr, encrypted_password, client_id, encrypted_refresh_token, group_id, normalized_sort_order,
+                remark, status,
                 account_type, provider, imap_host, imap_port, encrypted_imap_password, 1 if forward_enabled else 0,
                 account_id
             ))
@@ -662,14 +755,1083 @@ def update_account(account_id: int, email_addr: str, password: str, client_id: s
         return False
 
 
+PROJECT_ACCOUNT_STATUSES = {'toClaim', 'claiming', 'done', 'failed', 'removed', 'deleted'}
+PROJECT_RESTORABLE_STATUSES = {'toClaim', 'done', 'failed', 'removed'}
+
+
+def project_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def normalize_project_key(project_key: str) -> str:
+    return str(project_key or '').strip().lower()
+
+
+def normalize_project_group_ids(group_ids: Optional[List[int]]) -> List[int]:
+    return normalize_account_ids(group_ids or [])
+
+
+def parse_bool_flag(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {'1', 'true', 'yes', 'on'}:
+            return True
+        if normalized in {'0', 'false', 'no', 'off', ''}:
+            return False
+    return bool(value)
+
+
+def serialize_project_event_detail(detail: Any) -> str:
+    if detail in (None, ''):
+        return ''
+    if isinstance(detail, str):
+        return detail
+    try:
+        return json.dumps(detail, ensure_ascii=False)
+    except Exception:
+        return str(detail)
+
+
+def add_project_event(
+    project_id: int,
+    normalized_email: str,
+    action: str,
+    *,
+    account_id: Optional[int] = None,
+    project_account_id: Optional[int] = None,
+    from_status: Optional[str] = None,
+    to_status: Optional[str] = None,
+    caller_id: str = '',
+    task_id: str = '',
+    claim_token: str = '',
+    detail: Any = None,
+    db=None,
+) -> None:
+    database = db or get_db()
+    database.execute(
+        '''
+        INSERT INTO project_account_events (
+            project_id, account_id, normalized_email, project_account_id,
+            action, from_status, to_status, caller_id, task_id, claim_token, detail, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''',
+        (
+            project_id,
+            account_id,
+            normalized_email,
+            project_account_id,
+            action,
+            from_status,
+            to_status,
+            caller_id or '',
+            task_id or '',
+            claim_token or '',
+            serialize_project_event_detail(detail),
+            project_now_iso(),
+        ),
+    )
+
+
+def load_project_group_ids(project_id: int, db=None) -> List[int]:
+    database = db or get_db()
+    rows = database.execute(
+        '''
+        SELECT group_id FROM project_group_scopes
+        WHERE project_id = ?
+        ORDER BY group_id ASC
+        ''',
+        (project_id,)
+    ).fetchall()
+    return [int(row['group_id']) for row in rows]
+
+
+def serialize_project_row(project_row: sqlite3.Row, db=None) -> Dict[str, Any]:
+    project = dict(project_row)
+    project['group_ids'] = load_project_group_ids(project['id'], db=db)
+    project['use_alias_email'] = bool(project.get('use_alias_email', 0))
+    project['total_count'] = int(project.get('total_count') or 0)
+    project['to_claim_count'] = int(project.get('to_claim_count') or 0)
+    project['claiming_count'] = int(project.get('claiming_count') or 0)
+    project['done_count'] = int(project.get('done_count') or 0)
+    project['failed_count'] = int(project.get('failed_count') or 0)
+    project['removed_count'] = int(project.get('removed_count') or 0)
+    project['deleted_count'] = int(project.get('deleted_count') or 0)
+    return project
+
+
+def get_project_by_key(project_key: str, db=None) -> Optional[Dict[str, Any]]:
+    database = db or get_db()
+    normalized_key = normalize_project_key(project_key)
+    if not normalized_key:
+        return None
+
+    row = database.execute(
+        '''
+        SELECT
+            p.*,
+            COUNT(pa.id) AS total_count,
+            SUM(CASE WHEN pa.status = 'toClaim' THEN 1 ELSE 0 END) AS to_claim_count,
+            SUM(CASE WHEN pa.status = 'claiming' THEN 1 ELSE 0 END) AS claiming_count,
+            SUM(CASE WHEN pa.status = 'done' THEN 1 ELSE 0 END) AS done_count,
+            SUM(CASE WHEN pa.status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
+            SUM(CASE WHEN pa.status = 'removed' THEN 1 ELSE 0 END) AS removed_count,
+            SUM(CASE WHEN pa.status = 'deleted' THEN 1 ELSE 0 END) AS deleted_count
+        FROM projects p
+        LEFT JOIN project_accounts pa ON pa.project_id = p.id
+        WHERE p.project_key = ?
+        GROUP BY p.id
+        ''',
+        (normalized_key,)
+    ).fetchone()
+    return serialize_project_row(row, db=database) if row else None
+
+
+def load_projects() -> List[Dict[str, Any]]:
+    db = get_db()
+    rows = db.execute(
+        '''
+        SELECT
+            p.*,
+            COUNT(pa.id) AS total_count,
+            SUM(CASE WHEN pa.status = 'toClaim' THEN 1 ELSE 0 END) AS to_claim_count,
+            SUM(CASE WHEN pa.status = 'claiming' THEN 1 ELSE 0 END) AS claiming_count,
+            SUM(CASE WHEN pa.status = 'done' THEN 1 ELSE 0 END) AS done_count,
+            SUM(CASE WHEN pa.status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
+            SUM(CASE WHEN pa.status = 'removed' THEN 1 ELSE 0 END) AS removed_count,
+            SUM(CASE WHEN pa.status = 'deleted' THEN 1 ELSE 0 END) AS deleted_count
+        FROM projects p
+        LEFT JOIN project_accounts pa ON pa.project_id = p.id
+        GROUP BY p.id
+        ORDER BY p.updated_at DESC, p.id DESC
+        '''
+    ).fetchall()
+    return [serialize_project_row(row, db=db) for row in rows]
+
+
+def get_project_scope_accounts(project_id: int, db=None) -> List[sqlite3.Row]:
+    database = db or get_db()
+    project_row = database.execute(
+        'SELECT id, scope_mode, use_alias_email FROM projects WHERE id = ?',
+        (project_id,)
+    ).fetchone()
+    if not project_row:
+        return []
+
+    if project_row['scope_mode'] == 'groups':
+        account_rows = database.execute(
+            '''
+            SELECT DISTINCT a.id, a.email, a.group_id
+            FROM accounts a
+            JOIN project_group_scopes pgs ON pgs.group_id = a.group_id
+            WHERE pgs.project_id = ?
+            ORDER BY a.id ASC
+            ''',
+            (project_id,)
+        ).fetchall()
+    else:
+        account_rows = database.execute(
+            '''
+            SELECT a.id, a.email, a.group_id
+            FROM accounts a
+            ORDER BY a.id ASC
+            '''
+        ).fetchall()
+
+    if not parse_bool_flag(project_row['use_alias_email'], False):
+        return [dict(row) for row in account_rows]
+
+    scope_accounts: List[Dict[str, Any]] = []
+    for row in account_rows:
+        aliases = get_account_aliases(int(row['id']))
+        if aliases:
+            for alias_email in aliases:
+                normalized_alias = normalize_email_address(alias_email)
+                if not normalized_alias:
+                    continue
+                scope_accounts.append({
+                    'id': row['id'],
+                    'email': normalized_alias,
+                    'group_id': row['group_id'],
+                })
+            continue
+        scope_accounts.append({
+            'id': row['id'],
+            'email': row['email'],
+            'group_id': row['group_id'],
+        })
+
+    return scope_accounts
+
+
+def update_project_group_scopes(project_id: int, group_ids: List[int], db=None) -> None:
+    database = db or get_db()
+    database.execute('DELETE FROM project_group_scopes WHERE project_id = ?', (project_id,))
+    now_str = project_now_iso()
+    for group_id in group_ids:
+        database.execute(
+            '''
+            INSERT INTO project_group_scopes (project_id, group_id, created_at)
+            VALUES (?, ?, ?)
+            ''',
+            (project_id, group_id, now_str)
+        )
+
+
+def reconcile_deleted_project_accounts(project_id: int, db=None) -> int:
+    database = db or get_db()
+    rows = database.execute(
+        '''
+        SELECT pa.id, pa.account_id, pa.normalized_email, pa.status
+        FROM project_accounts pa
+        LEFT JOIN accounts a ON a.id = pa.account_id
+        WHERE pa.project_id = ?
+          AND pa.account_id IS NOT NULL
+          AND a.id IS NULL
+          AND pa.status != 'deleted'
+        ''',
+        (project_id,)
+    ).fetchall()
+    if not rows:
+        return 0
+
+    now_str = project_now_iso()
+    for row in rows:
+        from_status = row['status'] or 'toClaim'
+        database.execute(
+            '''
+            UPDATE project_accounts
+            SET account_id = NULL,
+                status = 'deleted',
+                deleted_from_status = ?,
+                claim_token = NULL,
+                claimed_at = NULL,
+                lease_expires_at = NULL,
+                caller_id = '',
+                task_id = '',
+                updated_at = ?
+            WHERE id = ?
+            ''',
+            (from_status, now_str, row['id'])
+        )
+        add_project_event(
+            project_id,
+            row['normalized_email'],
+            'mark_deleted',
+            account_id=row['account_id'],
+            project_account_id=row['id'],
+            from_status=from_status,
+            to_status='deleted',
+            detail='account_missing_from_accounts',
+            db=database,
+        )
+    return len(rows)
+
+
+def sync_project_scope(project_id: int, db=None) -> int:
+    database = db or get_db()
+    existing_rows = database.execute(
+        '''
+        SELECT *
+        FROM project_accounts
+        WHERE project_id = ?
+        ORDER BY id ASC
+        ''',
+        (project_id,)
+    ).fetchall()
+    existing_by_email = {str(row['normalized_email'] or ''): row for row in existing_rows}
+
+    now_str = project_now_iso()
+    added_count = 0
+
+    for account_row in get_project_scope_accounts(project_id, db=database):
+        normalized_email = normalize_email_address(account_row['email'])
+        if not normalized_email:
+            continue
+
+        existing = existing_by_email.get(normalized_email)
+        if existing is None:
+            cursor = database.execute(
+                '''
+                INSERT INTO project_accounts (
+                    project_id, account_id, normalized_email, email_snapshot,
+                    status, source_group_id, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, 'toClaim', ?, ?, ?)
+                ''',
+                (
+                    project_id,
+                    account_row['id'],
+                    normalized_email,
+                    account_row['email'],
+                    account_row['group_id'],
+                    now_str,
+                    now_str,
+                )
+            )
+            add_project_event(
+                project_id,
+                normalized_email,
+                'sync_add',
+                account_id=account_row['id'],
+                project_account_id=cursor.lastrowid,
+                to_status='toClaim',
+                detail={'source_group_id': account_row['group_id']},
+                db=database,
+            )
+            added_count += 1
+            continue
+
+        new_status = existing['status']
+        if existing['status'] == 'deleted':
+            previous_status = str(existing['deleted_from_status'] or '').strip()
+            new_status = previous_status if previous_status in PROJECT_RESTORABLE_STATUSES else 'toClaim'
+            add_project_event(
+                project_id,
+                normalized_email,
+                'sync_restore',
+                account_id=account_row['id'],
+                project_account_id=existing['id'],
+                from_status='deleted',
+                to_status=new_status,
+                detail='restored_by_normalized_email_match',
+                db=database,
+            )
+
+        database.execute(
+            '''
+            UPDATE project_accounts
+            SET account_id = ?,
+                email_snapshot = ?,
+                source_group_id = ?,
+                status = ?,
+                deleted_from_status = '',
+                updated_at = ?
+            WHERE id = ?
+            ''',
+            (
+                account_row['id'],
+                account_row['email'],
+                account_row['group_id'],
+                new_status,
+                now_str,
+                existing['id'],
+            )
+        )
+
+    return added_count
+
+
+def start_project(
+    project_key: str,
+    *,
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+    group_ids: Optional[List[int]] = None,
+    group_ids_provided: bool = False,
+    use_alias_email: Optional[bool] = None,
+    use_alias_email_provided: bool = False,
+) -> Dict[str, Any]:
+    db = get_db()
+    normalized_key = normalize_project_key(project_key)
+    if not normalized_key:
+        raise ValueError('project_key 不能为空')
+
+    clean_name = sanitize_input((name or '').strip(), max_length=100) if name is not None else ''
+    clean_description = sanitize_input(description or '', max_length=500) if description is not None else ''
+    normalized_group_ids = normalize_project_group_ids(group_ids)
+    normalized_use_alias_email = parse_bool_flag(use_alias_email, False)
+
+    now_str = project_now_iso()
+    created = False
+
+    try:
+        db.execute('BEGIN IMMEDIATE')
+        existing = db.execute(
+            'SELECT * FROM projects WHERE project_key = ? LIMIT 1',
+            (normalized_key,)
+        ).fetchone()
+
+        if existing is None:
+            if not clean_name:
+                clean_name = normalized_key
+            scope_mode = 'groups' if normalized_group_ids else 'all'
+            cursor = db.execute(
+                '''
+                INSERT INTO projects (
+                    name, project_key, description, scope_mode, use_alias_email, status,
+                    last_scope_synced_at, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)
+                ''',
+                (clean_name, normalized_key, clean_description, scope_mode, int(normalized_use_alias_email), now_str, now_str, now_str)
+            )
+            project_id = cursor.lastrowid
+            created = True
+            if normalized_group_ids:
+                update_project_group_scopes(project_id, normalized_group_ids, db=db)
+        else:
+            project_id = existing['id']
+            scope_mode = existing['scope_mode']
+            effective_use_alias_email = parse_bool_flag(existing['use_alias_email'], False)
+            if group_ids_provided:
+                scope_mode = 'groups' if normalized_group_ids else 'all'
+                update_project_group_scopes(project_id, normalized_group_ids, db=db)
+            if use_alias_email_provided:
+                effective_use_alias_email = normalized_use_alias_email
+
+            db.execute(
+                '''
+                UPDATE projects
+                SET name = ?,
+                    description = ?,
+                    scope_mode = ?,
+                    use_alias_email = ?,
+                    status = 'active',
+                    last_scope_synced_at = ?,
+                    updated_at = ?
+                WHERE id = ?
+                ''',
+                (
+                    clean_name or existing['name'],
+                    clean_description if description is not None else (existing['description'] or ''),
+                    scope_mode,
+                    int(effective_use_alias_email),
+                    now_str,
+                    now_str,
+                    project_id,
+                )
+            )
+
+        deleted_count = reconcile_deleted_project_accounts(project_id, db=db)
+        added_count = sync_project_scope(project_id, db=db)
+        total_count = int(
+            db.execute(
+                'SELECT COUNT(*) AS count FROM project_accounts WHERE project_id = ?',
+                (project_id,)
+            ).fetchone()['count']
+        )
+        db.commit()
+
+        project = get_project_by_key(normalized_key, db=db) or {}
+        project['created'] = created
+        project['added_count'] = added_count
+        project['deleted_count'] = deleted_count
+        project['total_count'] = total_count
+        return project
+    except Exception:
+        db.rollback()
+        raise
+
+
+def recycle_expired_project_claims(db=None) -> int:
+    database = db or get_db()
+    now_str = project_now_iso()
+    rows = database.execute(
+        '''
+        SELECT id, project_id, account_id, normalized_email, claim_token
+        FROM project_accounts
+        WHERE status = 'claiming'
+          AND lease_expires_at IS NOT NULL
+          AND lease_expires_at < ?
+        ''',
+        (now_str,)
+    ).fetchall()
+    recycled = 0
+    for row in rows:
+        database.execute(
+            '''
+            UPDATE project_accounts
+            SET status = 'toClaim',
+                claim_token = NULL,
+                claimed_at = NULL,
+                lease_expires_at = NULL,
+                caller_id = '',
+                task_id = '',
+                updated_at = ?
+            WHERE id = ?
+            ''',
+            (now_str, row['id'])
+        )
+        add_project_event(
+            row['project_id'],
+            row['normalized_email'],
+            'expire_recycle',
+            account_id=row['account_id'],
+            project_account_id=row['id'],
+            from_status='claiming',
+            to_status='toClaim',
+            claim_token=row['claim_token'] or '',
+            db=database,
+        )
+        recycled += 1
+    return recycled
+
+
+def claim_project_account(project_key: str, caller_id: str, task_id: str, lease_seconds: int = 600) -> Optional[Dict[str, Any]]:
+    normalized_key = normalize_project_key(project_key)
+    if not normalized_key:
+        raise ValueError('project_key 不能为空')
+    if not str(caller_id or '').strip():
+        raise ValueError('caller_id 不能为空')
+    if not str(task_id or '').strip():
+        raise ValueError('task_id 不能为空')
+
+    try:
+        lease_seconds = int(lease_seconds or 600)
+    except (TypeError, ValueError):
+        lease_seconds = 600
+    lease_seconds = max(1, min(lease_seconds, 3600))
+
+    db = get_db()
+    now = datetime.now(timezone.utc)
+    now_str = now.isoformat()
+    lease_expires_at = (now + timedelta(seconds=lease_seconds)).isoformat()
+    claim_token = 'pclm_' + secrets.token_urlsafe(9)
+
+    try:
+        db.execute('BEGIN IMMEDIATE')
+        recycle_expired_project_claims(db=db)
+        project = db.execute(
+            'SELECT * FROM projects WHERE project_key = ? LIMIT 1',
+            (normalized_key,)
+        ).fetchone()
+        if not project or project['status'] != 'active':
+            db.rollback()
+            return None
+
+        row = db.execute(
+            '''
+            SELECT
+                pa.id AS project_account_id,
+                pa.project_id,
+                pa.account_id,
+                pa.normalized_email,
+                pa.email_snapshot,
+                pa.source_group_id,
+                p.use_alias_email,
+                a.email,
+                a.group_id,
+                a.remark,
+                a.status AS account_status,
+                a.provider,
+                a.account_type
+            FROM project_accounts pa
+            JOIN projects p ON p.id = pa.project_id
+            JOIN accounts a ON a.id = pa.account_id
+            WHERE pa.project_id = ?
+              AND pa.status = 'toClaim'
+              AND a.status = 'active'
+              AND NOT EXISTS (
+                    SELECT 1 FROM project_accounts pa2
+                    WHERE pa2.account_id = pa.account_id
+                      AND pa2.status = 'claiming'
+                      AND pa2.id != pa.id
+              )
+            ORDER BY pa.updated_at ASC, pa.id ASC
+            LIMIT 1
+            ''',
+            (project['id'],)
+        ).fetchone()
+
+        if not row:
+            db.rollback()
+            return None
+
+        db.execute(
+            '''
+            UPDATE project_accounts
+            SET status = 'claiming',
+                caller_id = ?,
+                task_id = ?,
+                claim_token = ?,
+                claimed_at = ?,
+                lease_expires_at = ?,
+                claim_count = claim_count + 1,
+                first_claimed_at = COALESCE(first_claimed_at, ?),
+                last_claimed_at = ?,
+                updated_at = ?
+            WHERE id = ?
+            ''',
+            (
+                caller_id.strip(),
+                task_id.strip(),
+                claim_token,
+                now_str,
+                lease_expires_at,
+                now_str,
+                now_str,
+                now_str,
+                row['project_account_id'],
+            )
+        )
+        add_project_event(
+            row['project_id'],
+            row['normalized_email'],
+            'claim',
+            account_id=row['account_id'],
+            project_account_id=row['project_account_id'],
+            from_status='toClaim',
+            to_status='claiming',
+            caller_id=caller_id,
+            task_id=task_id,
+            claim_token=claim_token,
+            detail={'lease_seconds': lease_seconds},
+            db=db,
+        )
+        db.commit()
+        use_alias_email = parse_bool_flag(row['use_alias_email'], False)
+        return {
+            'project_key': normalized_key,
+            'project_account_id': row['project_account_id'],
+            'account_id': row['account_id'],
+            'email': row['email_snapshot'] if use_alias_email else (row['email'] or row['email_snapshot']),
+            'primary_email': row['email'] or '',
+            'group_id': row['group_id'] if row['group_id'] is not None else row['source_group_id'],
+            'provider': row['provider'] or '',
+            'account_type': row['account_type'] or '',
+            'remark': row['remark'] or '',
+            'claim_token': claim_token,
+            'claimed_at': now_str,
+            'lease_expires_at': lease_expires_at,
+        }
+    except Exception:
+        db.rollback()
+        raise
+
+
+def get_project_account_claim(project_key: str, account_id: int, claim_token: str, db=None) -> Optional[sqlite3.Row]:
+    database = db or get_db()
+    normalized_key = normalize_project_key(project_key)
+    return database.execute(
+        '''
+        SELECT pa.*, p.project_key
+        FROM project_accounts pa
+        JOIN projects p ON p.id = pa.project_id
+        WHERE p.project_key = ?
+          AND pa.account_id = ?
+          AND pa.claim_token = ?
+        LIMIT 1
+        ''',
+        (normalized_key, account_id, claim_token)
+    ).fetchone()
+
+
+def complete_project_account_success(project_key: str, account_id: int, claim_token: str,
+                                     caller_id: str = '', task_id: str = '', detail: str = '') -> bool:
+    db = get_db()
+    now_str = project_now_iso()
+    try:
+        db.execute('BEGIN IMMEDIATE')
+        row = get_project_account_claim(project_key, account_id, claim_token, db=db)
+        if not row or row['status'] != 'claiming':
+            db.rollback()
+            return False
+        db.execute(
+            '''
+            UPDATE project_accounts
+            SET status = 'done',
+                claim_token = NULL,
+                claimed_at = NULL,
+                lease_expires_at = NULL,
+                caller_id = '',
+                task_id = '',
+                last_result = 'success',
+                last_result_detail = ?,
+                done_at = ?,
+                updated_at = ?
+            WHERE id = ?
+            ''',
+            (detail or '', now_str, now_str, row['id'])
+        )
+        add_project_event(
+            row['project_id'],
+            row['normalized_email'],
+            'complete_success',
+            account_id=account_id,
+            project_account_id=row['id'],
+            from_status='claiming',
+            to_status='done',
+            caller_id=caller_id,
+            task_id=task_id,
+            claim_token=claim_token,
+            detail=detail,
+            db=db,
+        )
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        raise
+
+
+def complete_project_account_failed(project_key: str, account_id: int, claim_token: str,
+                                    caller_id: str = '', task_id: str = '', detail: str = '') -> bool:
+    db = get_db()
+    now_str = project_now_iso()
+    try:
+        db.execute('BEGIN IMMEDIATE')
+        row = get_project_account_claim(project_key, account_id, claim_token, db=db)
+        if not row or row['status'] != 'claiming':
+            db.rollback()
+            return False
+        db.execute(
+            '''
+            UPDATE project_accounts
+            SET status = 'failed',
+                claim_token = NULL,
+                claimed_at = NULL,
+                lease_expires_at = NULL,
+                caller_id = '',
+                task_id = '',
+                last_result = 'failed',
+                last_result_detail = ?,
+                updated_at = ?
+            WHERE id = ?
+            ''',
+            (detail or '', now_str, row['id'])
+        )
+        add_project_event(
+            row['project_id'],
+            row['normalized_email'],
+            'complete_failed',
+            account_id=account_id,
+            project_account_id=row['id'],
+            from_status='claiming',
+            to_status='failed',
+            caller_id=caller_id,
+            task_id=task_id,
+            claim_token=claim_token,
+            detail=detail,
+            db=db,
+        )
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        raise
+
+
+def release_project_account(project_key: str, account_id: int, claim_token: str,
+                            caller_id: str = '', task_id: str = '', detail: str = '') -> bool:
+    db = get_db()
+    now_str = project_now_iso()
+    try:
+        db.execute('BEGIN IMMEDIATE')
+        row = get_project_account_claim(project_key, account_id, claim_token, db=db)
+        if not row or row['status'] != 'claiming':
+            db.rollback()
+            return False
+        db.execute(
+            '''
+            UPDATE project_accounts
+            SET status = 'toClaim',
+                claim_token = NULL,
+                claimed_at = NULL,
+                lease_expires_at = NULL,
+                caller_id = '',
+                task_id = '',
+                updated_at = ?
+            WHERE id = ?
+            ''',
+            (now_str, row['id'])
+        )
+        add_project_event(
+            row['project_id'],
+            row['normalized_email'],
+            'release',
+            account_id=account_id,
+            project_account_id=row['id'],
+            from_status='claiming',
+            to_status='toClaim',
+            caller_id=caller_id,
+            task_id=task_id,
+            claim_token=claim_token,
+            detail=detail,
+            db=db,
+        )
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        raise
+
+
+def update_project_account_status(project_key: str, account_id: int, from_status: str, to_status: str,
+                                  action: str, detail: str = '') -> bool:
+    if to_status not in PROJECT_ACCOUNT_STATUSES:
+        return False
+    db = get_db()
+    now_str = project_now_iso()
+    normalized_key = normalize_project_key(project_key)
+    try:
+        db.execute('BEGIN IMMEDIATE')
+        row = db.execute(
+            '''
+            SELECT pa.*
+            FROM project_accounts pa
+            JOIN projects p ON p.id = pa.project_id
+            WHERE p.project_key = ? AND pa.account_id = ?
+            LIMIT 1
+            ''',
+            (normalized_key, account_id)
+        ).fetchone()
+        if not row or row['status'] != from_status:
+            db.rollback()
+            return False
+        db.execute(
+            '''
+            UPDATE project_accounts
+            SET status = ?,
+                updated_at = ?,
+                deleted_from_status = CASE WHEN ? != 'deleted' THEN deleted_from_status ELSE deleted_from_status END
+            WHERE id = ?
+            ''',
+            (to_status, now_str, to_status, row['id'])
+        )
+        add_project_event(
+            row['project_id'],
+            row['normalized_email'],
+            action,
+            account_id=account_id,
+            project_account_id=row['id'],
+            from_status=from_status,
+            to_status=to_status,
+            detail=detail,
+            db=db,
+        )
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        raise
+
+
+def reset_project_account_failed(project_key: str, account_id: int, detail: str = '') -> bool:
+    return update_project_account_status(project_key, account_id, 'failed', 'toClaim', 'reset_failed', detail)
+
+
+def remove_project_account(project_key: str, account_id: int, detail: str = '') -> bool:
+    normalized_key = normalize_project_key(project_key)
+    db = get_db()
+    now_str = project_now_iso()
+    try:
+        db.execute('BEGIN IMMEDIATE')
+        row = db.execute(
+            '''
+            SELECT pa.*
+            FROM project_accounts pa
+            JOIN projects p ON p.id = pa.project_id
+            WHERE p.project_key = ? AND pa.account_id = ?
+            LIMIT 1
+            ''',
+            (normalized_key, account_id)
+        ).fetchone()
+        if not row or row['status'] == 'claiming':
+            db.rollback()
+            return False
+        db.execute(
+            '''
+            UPDATE project_accounts
+            SET status = 'removed',
+                claim_token = NULL,
+                claimed_at = NULL,
+                lease_expires_at = NULL,
+                caller_id = '',
+                task_id = '',
+                updated_at = ?
+            WHERE id = ?
+            ''',
+            (now_str, row['id'])
+        )
+        add_project_event(
+            row['project_id'],
+            row['normalized_email'],
+            'remove',
+            account_id=account_id,
+            project_account_id=row['id'],
+            from_status=row['status'],
+            to_status='removed',
+            detail=detail,
+            db=db,
+        )
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        raise
+
+
+def restore_project_account(project_key: str, account_id: int, detail: str = '') -> bool:
+    return update_project_account_status(project_key, account_id, 'removed', 'toClaim', 'restore', detail)
+
+
+def load_project_accounts(project_key: str, status: str = '', group_id: Optional[int] = None,
+                          provider: str = '', keyword: str = '') -> Optional[Dict[str, Any]]:
+    db = get_db()
+    project = get_project_by_key(project_key, db=db)
+    if not project:
+        return None
+
+    sql = '''
+        SELECT
+            pa.id AS project_account_id,
+            pa.project_id,
+            pa.account_id,
+            pa.normalized_email,
+            pa.email_snapshot,
+            pa.status AS project_status,
+            pa.source_group_id,
+            pa.caller_id,
+            pa.task_id,
+            pa.claim_token,
+            pa.claimed_at,
+            pa.lease_expires_at,
+            pa.last_result,
+            pa.last_result_detail,
+            pa.claim_count,
+            pa.first_claimed_at,
+            pa.last_claimed_at,
+            pa.done_at,
+            pa.created_at,
+            pa.updated_at,
+            a.email AS current_email,
+            a.group_id AS current_group_id,
+            a.provider,
+            a.account_type,
+            a.status AS account_status,
+            a.remark,
+            g_current.name AS current_group_name,
+            g_source.name AS source_group_name
+        FROM project_accounts pa
+        LEFT JOIN accounts a ON a.id = pa.account_id
+        LEFT JOIN groups g_current ON g_current.id = a.group_id
+        LEFT JOIN groups g_source ON g_source.id = pa.source_group_id
+        WHERE pa.project_id = ?
+    '''
+    params: List[Any] = [project['id']]
+
+    if status:
+        sql += ' AND pa.status = ?'
+        params.append(status)
+    if group_id is not None:
+        sql += ' AND COALESCE(a.group_id, pa.source_group_id) = ?'
+        params.append(group_id)
+    if provider:
+        sql += ' AND COALESCE(a.provider, \'\') = ?'
+        params.append(provider)
+    if keyword:
+        sql += ' AND (COALESCE(a.email, \'\') LIKE ? OR pa.email_snapshot LIKE ? OR COALESCE(a.remark, \'\') LIKE ?)'
+        like = f'%{keyword}%'
+        params.extend([like, like, like])
+
+    sql += ' ORDER BY pa.updated_at DESC, pa.id DESC'
+
+    rows = db.execute(sql, params).fetchall()
+    accounts = []
+    use_alias_email = parse_bool_flag(project.get('use_alias_email'), False)
+    for row in rows:
+        accounts.append({
+            'project_account_id': row['project_account_id'],
+            'account_id': row['account_id'],
+            'email': row['email_snapshot'] if use_alias_email else (row['current_email'] or row['email_snapshot']),
+            'primary_email': row['current_email'] or '',
+            'normalized_email': row['normalized_email'],
+            'provider': row['provider'] or '',
+            'account_type': row['account_type'] or '',
+            'group_id': row['current_group_id'] if row['current_group_id'] is not None else row['source_group_id'],
+            'group_name': row['current_group_name'] or row['source_group_name'] or '',
+            'remark': row['remark'] or '',
+            'project_status': row['project_status'],
+            'account_status': row['account_status'] or '',
+            'caller_id': row['caller_id'] or '',
+            'task_id': row['task_id'] or '',
+            'claim_token': row['claim_token'] or '',
+            'claimed_at': row['claimed_at'] or '',
+            'lease_expires_at': row['lease_expires_at'] or '',
+            'last_result': row['last_result'] or '',
+            'last_result_detail': row['last_result_detail'] or '',
+            'claim_count': int(row['claim_count'] or 0),
+            'first_claimed_at': row['first_claimed_at'] or '',
+            'last_claimed_at': row['last_claimed_at'] or '',
+            'done_at': row['done_at'] or '',
+            'created_at': row['created_at'] or '',
+            'updated_at': row['updated_at'] or '',
+        })
+
+    return {
+        'project': project,
+        'accounts': accounts,
+    }
+
+
+def mark_project_accounts_deleted_for_account_ids(account_ids: List[int], db=None) -> int:
+    database = db or get_db()
+    normalized_ids = normalize_account_ids(account_ids)
+    if not normalized_ids:
+        return 0
+
+    placeholders = ','.join('?' * len(normalized_ids))
+    rows = database.execute(
+        f'''
+        SELECT id, project_id, account_id, normalized_email, status
+        FROM project_accounts
+        WHERE account_id IN ({placeholders})
+          AND status != 'deleted'
+        ''',
+        normalized_ids
+    ).fetchall()
+    if not rows:
+        return 0
+
+    now_str = project_now_iso()
+    for row in rows:
+        database.execute(
+            '''
+            UPDATE project_accounts
+            SET account_id = NULL,
+                status = 'deleted',
+                deleted_from_status = ?,
+                claim_token = NULL,
+                claimed_at = NULL,
+                lease_expires_at = NULL,
+                caller_id = '',
+                task_id = '',
+                updated_at = ?
+            WHERE id = ?
+            ''',
+            (row['status'] or 'toClaim', now_str, row['id'])
+        )
+        add_project_event(
+            row['project_id'],
+            row['normalized_email'],
+            'mark_deleted',
+            account_id=row['account_id'],
+            project_account_id=row['id'],
+            from_status=row['status'] or 'toClaim',
+            to_status='deleted',
+            detail='account_deleted_from_system',
+            db=database,
+        )
+    return len(rows)
+
+
 def delete_account_by_id(account_id: int) -> bool:
     """删除邮箱账号"""
     db = get_db()
     try:
+        mark_project_accounts_deleted_for_account_ids([account_id], db=db)
         db.execute('DELETE FROM accounts WHERE id = ?', (account_id,))
         db.commit()
         return True
     except Exception:
+        db.rollback()
         return False
 
 
@@ -677,10 +1839,14 @@ def delete_account_by_email(email_addr: str) -> bool:
     """根据邮箱地址删除账号"""
     db = get_db()
     try:
+        row = db.execute('SELECT id FROM accounts WHERE email = ? LIMIT 1', (email_addr,)).fetchone()
+        if row:
+            mark_project_accounts_deleted_for_account_ids([row['id']], db=db)
         db.execute('DELETE FROM accounts WHERE email = ?', (email_addr,))
         db.commit()
         return True
     except Exception:
+        db.rollback()
         return False
 
 
@@ -725,6 +1891,7 @@ def delete_accounts_by_ids(account_ids: List[int]) -> Dict[str, Any]:
 
     try:
         delete_placeholders = ','.join('?' * len(existing_ids))
+        mark_project_accounts_deleted_for_account_ids(existing_ids, db=db)
         db.execute(f'DELETE FROM accounts WHERE id IN ({delete_placeholders})', existing_ids)
         db.commit()
         return {

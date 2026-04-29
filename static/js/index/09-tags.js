@@ -1,8 +1,17 @@
-        /* global handleApiError, hideModal, loadAccountsByGroup, renderFilteredAccountList, selectedTagFilters, showModal, showToast, updateBatchTagTagOptions, updateCurrentGroupHeader */
+        /* global UNTAGGED_TAG_FILTER_KEY, accountsCache, currentAccountListSource, currentGroupId, handleApiError, hideModal, isTempEmailGroup, isUntaggedTagFilterValue, loadAccountsByGroup, loadTempEmails, normalizeTagFilterSelectionValue, refreshVisibleAccountList, renderFilteredAccountList, renderTempEmailList, selectedTagFilters, showModal, showToast, updateBatchTagTagOptions, updateCurrentGroupHeader */
 
         // ==================== 标签管理 ====================
 
         let allTags = [];
+        const UNTAGGED_TAG_FILTER_ITEM = {
+            id: UNTAGGED_TAG_FILTER_KEY,
+            name: '无标签',
+            color: '#9ca3af',
+        };
+
+        function getTagFilterOptionItems() {
+            return [UNTAGGED_TAG_FILTER_ITEM, ...allTags];
+        }
 
         // 显示标签管理模态框
         async function showTagManagementModal() {
@@ -23,7 +32,12 @@
                 if (data.success) {
                     allTags = data.tags;
                     selectedTagFilters = new Set(
-                        Array.from(selectedTagFilters).filter(tagId => allTags.some(tag => tag.id === tagId))
+                        Array.from(selectedTagFilters).filter(tagId => {
+                            if (isUntaggedTagFilterValue(tagId)) {
+                                return true;
+                            }
+                            return allTags.some(tag => tag.id === normalizeTagFilterSelectionValue(tagId));
+                        })
                     );
                     renderTagList();
                     updateTagFilter();
@@ -34,7 +48,7 @@
         }
 
         function getSelectedTagFilterItems() {
-            return allTags.filter(tag => selectedTagFilters.has(tag.id));
+            return getTagFilterOptionItems().filter(tag => selectedTagFilters.has(tag.id));
         }
 
         function getTagFilterSummaryText() {
@@ -102,7 +116,17 @@
             });
             updateTagFilterSummary();
             if (currentAccountListSource.length) {
-                renderFilteredAccountList(currentAccountListSource);
+                if (isTempEmailGroup) {
+                    renderTempEmailList(currentAccountListSource);
+                } else {
+                    renderFilteredAccountList(currentAccountListSource);
+                }
+            } else if (currentGroupId) {
+                if (isTempEmailGroup) {
+                    loadTempEmails();
+                } else {
+                    loadAccountsByGroup(currentGroupId);
+                }
             }
         }
 
@@ -111,16 +135,9 @@
             const container = document.getElementById('tagFilterContainer');
             if (!container) return;
 
-            if (allTags.length === 0) {
-                container.style.display = 'none';
-                container.innerHTML = '';
-                return;
-            }
+            container.style.display = 'flex';
 
-            container.style.display = isTempEmailGroup ? 'none' : 'flex';
-            if (isTempEmailGroup) return;
-
-            const optionsHtml = allTags.map(tag => `
+            const optionsHtml = getTagFilterOptionItems().map(tag => `
                 <label class="tag-filter-option ${selectedTagFilters.has(tag.id) ? 'is-checked' : ''}" data-tag-name="${escapeHtml(tag.name)}">
                     <input type="checkbox" class="tag-filter-checkbox" value="${tag.id}"
                         ${selectedTagFilters.has(tag.id) ? 'checked' : ''}
@@ -219,7 +236,7 @@
 
         // 删除标签
         async function deleteTag(id) {
-            if (!confirm('确定要删除这个标签吗？')) return;
+            if (!(await showConfirmModal('确定要删除这个标签吗？', { title: '删除标签', confirmText: '确认删除' }))) return;
 
             try {
                 const response = await fetch(`/api/tags/${id}`, { method: 'DELETE' });
@@ -228,10 +245,7 @@
                 if (data.success) {
                     showToast('标签已删除', 'success');
                     await loadTags();
-                    // 刷新账号列表以更新标签显示
-                    if (currentGroupId) {
-                        loadAccountsByGroup(currentGroupId, true);
-                    }
+                    await refreshVisibleAccountList(true);
                 } else {
                     showToast(data.error || '删除失败', 'error');
                 }

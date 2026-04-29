@@ -30,6 +30,7 @@ from email.header import decode_header
 from email.utils import parsedate_to_datetime
 from typing import Optional, List, Dict, Any
 from urllib.parse import quote, urlparse, unquote
+from zoneinfo import ZoneInfo
 from flask import Flask, render_template, request, jsonify, g, session, redirect, url_for, Response, make_response
 from functools import wraps
 import requests
@@ -73,6 +74,7 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
 scheduler_instance = None
 scheduler_lock = threading.Lock()
+token_refresh_run_lock = threading.Lock()
 proxy_socket_lock = threading.RLock()
 
 
@@ -112,13 +114,242 @@ TOKEN_URL_IMAP = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
 IMAP_SERVER_OLD = "outlook.office365.com"
 IMAP_SERVER_NEW = "outlook.live.com"
 IMAP_PORT = 993
+HTTP_REQUEST_TIMEOUT = int(os.getenv("HTTP_REQUEST_TIMEOUT", "30"))
 IMAP_TIMEOUT = int(os.getenv("IMAP_TIMEOUT", "45"))
+DEFAULT_APP_TIMEZONE = (os.getenv("APP_TIMEZONE", "Asia/Shanghai") or "Asia/Shanghai").strip()
+FALLBACK_APP_TIMEZONE = "UTC"
+MAIL_FETCH_OVERALL_TIMEOUT = int(
+    os.getenv("MAIL_FETCH_OVERALL_TIMEOUT", str(max(HTTP_REQUEST_TIMEOUT, IMAP_TIMEOUT) + 5))
+)
 
 try:
     with resource_path('VERSION').open('r', encoding='utf-8') as version_file:
         APP_VERSION = version_file.read().strip() or '1.0.0'
 except Exception:
     APP_VERSION = '1.0.0'
+
+REPOSITORY_OWNER = os.getenv('REPOSITORY_OWNER', 'assast')
+REPOSITORY_NAME = os.getenv('REPOSITORY_NAME', 'outlookEmail')
+CHANGELOG_URL = os.getenv(
+    'CHANGELOG_URL',
+    f'https://github.com/{REPOSITORY_OWNER}/{REPOSITORY_NAME}/blob/main/CHANGELOG.md',
+)
+REPOSITORY_URL = os.getenv(
+    'REPOSITORY_URL',
+    f'https://github.com/{REPOSITORY_OWNER}/{REPOSITORY_NAME}',
+)
+REPOSITORY_VERSION_URL = os.getenv(
+    'REPOSITORY_VERSION_URL',
+    f'https://github.com/{REPOSITORY_OWNER}/{REPOSITORY_NAME}/blob/main/VERSION',
+)
+LATEST_RELEASE_API_URL = os.getenv(
+    'LATEST_RELEASE_API_URL',
+    f'https://api.github.com/repos/{REPOSITORY_OWNER}/{REPOSITORY_NAME}/releases/latest',
+)
+RAW_VERSION_URL = os.getenv(
+    'RAW_VERSION_URL',
+    f'https://raw.githubusercontent.com/{REPOSITORY_OWNER}/{REPOSITORY_NAME}/main/VERSION',
+)
+VERSION_CHECK_TIMEOUT = max(2, int(os.getenv('VERSION_CHECK_TIMEOUT', '5')))
+VERSION_CHECK_CACHE_TTL = max(60, int(os.getenv('VERSION_CHECK_CACHE_TTL', '900')))
+VERSION_CHECK_CACHE_LOCK = threading.Lock()
+VERSION_CHECK_CACHE = {
+    'expires_at': 0.0,
+    'payload': None,
+}
+
+
+def normalize_version_label(version: str) -> str:
+    value = str(version or '').strip()
+    if not value:
+        return ''
+    return value if value.lower().startswith('v') else f'v{value}'
+
+
+def parse_version_parts(version: str) -> Optional[tuple[int, int, int]]:
+    normalized = normalize_version_label(version)
+    if not normalized:
+        return None
+
+    match = re.match(r'^v(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$', normalized)
+    if not match:
+        return None
+
+    return tuple(int(part) for part in match.groups())
+
+
+def compare_version_labels(left: str, right: str) -> Optional[int]:
+    left_parts = parse_version_parts(left)
+    right_parts = parse_version_parts(right)
+    if left_parts is None or right_parts is None:
+        return None
+    if left_parts < right_parts:
+        return -1
+    if left_parts > right_parts:
+        return 1
+    return 0
+
+
+def _version_request_headers() -> Dict[str, str]:
+    return {
+        'Accept': 'application/vnd.github+json',
+        'User-Agent': f'OutlookEmail/{normalize_version_label(APP_VERSION) or "v1.0.0"}',
+    }
+
+
+def _safe_response_json(response: requests.Response) -> Dict[str, Any]:
+    try:
+        payload = response.json()
+        if isinstance(payload, dict):
+            return payload
+    except Exception:
+        pass
+    return {}
+
+
+def fetch_remote_version_snapshot() -> Dict[str, Any]:
+    release_version = ''
+    release_url = ''
+    repository_version = ''
+    errors = []
+
+    try:
+        release_response = requests.get(
+            LATEST_RELEASE_API_URL,
+            headers=_version_request_headers(),
+            timeout=VERSION_CHECK_TIMEOUT,
+        )
+        release_response.raise_for_status()
+        release_payload = _safe_response_json(release_response)
+        release_version = normalize_version_label(release_payload.get('tag_name', ''))
+        release_url = str(release_payload.get('html_url', '')).strip()
+    except Exception as exc:
+        errors.append(f'release:{exc}')
+
+    try:
+        repository_response = requests.get(
+            RAW_VERSION_URL,
+            headers=_version_request_headers(),
+            timeout=VERSION_CHECK_TIMEOUT,
+        )
+        repository_response.raise_for_status()
+        repository_version = normalize_version_label(repository_response.text)
+    except Exception as exc:
+        errors.append(f'repository:{exc}')
+
+    return {
+        'release_version': release_version,
+        'release_url': release_url,
+        'repository_version': repository_version,
+        'errors': errors,
+    }
+
+
+def build_version_status_payload() -> Dict[str, Any]:
+    current_version = normalize_version_label(APP_VERSION) or 'v1.0.0'
+    current_parts = parse_version_parts(current_version)
+    snapshot = fetch_remote_version_snapshot()
+
+    release_version = snapshot['release_version']
+    repository_version = snapshot['repository_version']
+    latest_version = ''
+    latest_source = ''
+    latest_url = ''
+
+    release_parts = parse_version_parts(release_version)
+    repository_parts = parse_version_parts(repository_version)
+    valid_candidates = []
+    if release_parts is not None:
+        valid_candidates.append(('release', release_version, release_parts, snapshot['release_url'] or REPOSITORY_URL))
+    if repository_parts is not None:
+        valid_candidates.append(('repository', repository_version, repository_parts, REPOSITORY_VERSION_URL))
+
+    if valid_candidates:
+        latest_source, latest_version, _latest_parts, latest_url = max(valid_candidates, key=lambda item: item[2])
+
+    payload = {
+        'current_version': current_version,
+        'latest_version': latest_version,
+        'latest_release_version': release_version,
+        'latest_repository_version': repository_version,
+        'status': 'unknown',
+        'badge_label': '检查失败',
+        'hint': '暂时无法获取仓库版本信息',
+        'source': latest_source,
+        'update_url': latest_url or CHANGELOG_URL,
+        'release_url': snapshot['release_url'] or REPOSITORY_URL,
+        'repository_url': REPOSITORY_VERSION_URL,
+        'changelog_url': CHANGELOG_URL,
+        'checked_at': datetime.now(timezone.utc).isoformat(),
+        'errors': snapshot['errors'],
+    }
+
+    if current_parts is None:
+        payload['hint'] = f'当前版本号 {current_version} 无法参与比较'
+        return payload
+
+    if not latest_version:
+        return payload
+
+    current_vs_latest = compare_version_labels(current_version, latest_version)
+    current_vs_release = compare_version_labels(current_version, release_version) if release_version else None
+    current_vs_repository = compare_version_labels(current_version, repository_version) if repository_version else None
+
+    if current_vs_latest is None:
+        payload['hint'] = f'当前版本号 {current_version} 无法参与比较'
+        return payload
+
+    if current_vs_latest < 0:
+        payload['status'] = 'update_available'
+        payload['badge_label'] = '可更新'
+        if latest_source == 'release':
+            payload['hint'] = f'发现新版本 {latest_version}'
+        else:
+            payload['hint'] = f'仓库最新版本为 {latest_version}'
+        return payload
+
+    if current_vs_release is not None and current_vs_release > 0:
+        payload['status'] = 'ahead'
+        payload['badge_label'] = '开发版'
+        payload['hint'] = '当前版本高于已发布版本'
+        payload['update_url'] = CHANGELOG_URL
+        return payload
+
+    if current_vs_repository is not None and current_vs_repository > 0:
+        payload['status'] = 'ahead'
+        payload['badge_label'] = '开发版'
+        payload['hint'] = '当前版本高于仓库主分支版本'
+        payload['update_url'] = CHANGELOG_URL
+        return payload
+
+    payload['status'] = 'up_to_date'
+    payload['badge_label'] = '稳定版'
+    if current_vs_release == 0:
+        payload['hint'] = '与仓库发布版本同步'
+        payload['source'] = 'release'
+        payload['update_url'] = CHANGELOG_URL
+    elif current_vs_repository == 0:
+        payload['hint'] = '与仓库当前版本同步'
+        payload['source'] = 'repository'
+        payload['update_url'] = CHANGELOG_URL
+    else:
+        payload['hint'] = '当前版本已是最新'
+        payload['update_url'] = CHANGELOG_URL
+    return payload
+
+
+def get_version_status_payload(force_refresh: bool = False) -> Dict[str, Any]:
+    now = time.time()
+    with VERSION_CHECK_CACHE_LOCK:
+        cached_payload = VERSION_CHECK_CACHE.get('payload')
+        expires_at = float(VERSION_CHECK_CACHE.get('expires_at', 0.0) or 0.0)
+        if not force_refresh and cached_payload and expires_at > now:
+            return dict(cached_payload)
+
+        payload = build_version_status_payload()
+        VERSION_CHECK_CACHE['payload'] = payload
+        VERSION_CHECK_CACHE['expires_at'] = now + VERSION_CHECK_CACHE_TTL
+        return dict(payload)
 
 IMAP_IDENTITY_FIELDS = {
     'name': os.getenv('IMAP_ID_NAME', 'outlookEmail'),
@@ -170,6 +401,12 @@ MAIL_PROVIDERS = {
         "imap_port": 993,
         "account_type": "imap",
     },
+    "2925": {
+        "label": "2925邮箱",
+        "imap_host": "imap.2925.com",
+        "imap_port": 993,
+        "account_type": "imap",
+    },
     "custom": {
         "label": "自定义 IMAP",
         "imap_host": "",
@@ -194,6 +431,7 @@ DOMAIN_PROVIDER_MAP = {
     "yahoo.co.uk": "yahoo",
     "aliyun.com": "aliyun",
     "alimail.com": "aliyun",
+    "2925.com": "2925",
 }
 
 PROVIDER_FOLDER_MAP = {
@@ -222,6 +460,11 @@ PROVIDER_FOLDER_MAP = {
         "junkemail": ["Bulk Mail", "Spam"],
         "deleteditems": ["Trash"],
     },
+    "2925": {
+        "inbox": ["INBOX", "Inbox"],
+        "junkemail": ["&V4NXPnux-", "Junk", "Junk Email", "Spam", "SPAM"],
+        "deleteditems": ["&XfJT0ZAB-", "Trash", "Deleted", "Deleted Items", "Deleted Messages"],
+    },
     "_default": {
         "inbox": ["INBOX", "Inbox"],
         "junkemail": ["Junk", "Junk Email", "Spam", "SPAM", "Bulk Mail"],
@@ -237,8 +480,10 @@ IMAP_FOLDER_MATCH_ALIASES = {
 
 FORWARD_CHANNEL_EMAIL = "email"
 FORWARD_CHANNEL_TELEGRAM = "telegram"
+FORWARD_CHANNEL_WECOM = "wecom"
 FORWARD_CHANNEL_SMTP_SETTING = "smtp"
 FORWARD_CHANNEL_TG_SETTING = "telegram"
+FORWARD_CHANNEL_WECOM_SETTING = "wecom"
 SMTP_FORWARD_PROVIDERS = ('outlook', 'qq', '163', '126', 'yahoo', 'aliyun', 'custom')
 
 # 数据库文件
@@ -283,6 +528,10 @@ def infer_provider_from_email(email_addr: str) -> str:
 
 def normalize_provider(provider: str, email_addr: str = '') -> str:
     provider = (provider or '').strip().lower()
+    if provider == 'custom':
+        inferred = infer_provider_from_email(email_addr) if email_addr else 'custom'
+        if inferred == '2925':
+            provider = inferred
     if provider == 'auto':
         provider = infer_provider_from_email(email_addr)
     if provider not in MAIL_PROVIDERS:
@@ -697,6 +946,36 @@ def close_connection(exception):
         db.close()
 
 
+def normalize_group_sort_orders_on_startup(cursor) -> None:
+    """启动时归一化分组顺序，但保留已有自定义顺序。"""
+    cursor.execute(
+        '''
+        SELECT id, name, sort_order
+        FROM groups
+        ORDER BY
+            CASE WHEN name = '临时邮箱' THEN 0 ELSE 1 END,
+            CASE
+                WHEN name = '临时邮箱' THEN 0
+                WHEN COALESCE(sort_order, 0) > 0 THEN sort_order
+                ELSE 2147483647
+            END,
+            id
+        '''
+    )
+    group_rows = cursor.fetchall()
+
+    next_sort_order = 1
+    for group_id, group_name, sort_order in group_rows:
+        target_sort_order = 0 if group_name == '临时邮箱' else next_sort_order
+        if group_name != '临时邮箱':
+            next_sort_order += 1
+        if sort_order != target_sort_order:
+            cursor.execute(
+                'UPDATE groups SET sort_order = ? WHERE id = ?',
+                (target_sort_order, group_id)
+            )
+
+
 def init_db():
     """初始化数据库"""
     conn = sqlite3.connect(DATABASE)
@@ -734,6 +1013,7 @@ def init_db():
             client_id TEXT DEFAULT '',
             refresh_token TEXT DEFAULT '',
             group_id INTEGER,
+            sort_order INTEGER DEFAULT 0,
             remark TEXT,
             status TEXT DEFAULT 'active',
             account_type TEXT DEFAULT 'outlook',
@@ -744,6 +1024,9 @@ def init_db():
             forward_enabled INTEGER DEFAULT 0,
             forward_last_checked_at TIMESTAMP,
             last_refresh_at TIMESTAMP,
+            last_refresh_status TEXT DEFAULT 'never',
+            last_refresh_error TEXT,
+            refresh_token_updated_at TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (group_id) REFERENCES groups (id)
@@ -790,6 +1073,21 @@ def init_db():
             error_message TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE CASCADE
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS token_refresh_state (
+            scope_key TEXT PRIMARY KEY,
+            trigger_type TEXT DEFAULT '',
+            status TEXT DEFAULT 'idle',
+            started_at TIMESTAMP,
+            finished_at TIMESTAMP,
+            total_count INTEGER DEFAULT 0,
+            success_count INTEGER DEFAULT 0,
+            failed_count INTEGER DEFAULT 0,
+            error_summary TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
 
@@ -854,6 +1152,18 @@ def init_db():
         )
     ''')
 
+    # 创建临时邮箱标签关联表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS temp_email_tags (
+            temp_email_id INTEGER NOT NULL,
+            tag_id INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (temp_email_id, tag_id),
+            FOREIGN KEY (temp_email_id) REFERENCES temp_emails (id) ON DELETE CASCADE,
+            FOREIGN KEY (tag_id) REFERENCES tags (id) ON DELETE CASCADE
+        )
+    ''')
+
     # 创建账号别名表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS account_aliases (
@@ -866,12 +1176,112 @@ def init_db():
         )
     ''')
 
+    # 创建项目表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS projects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            project_key TEXT UNIQUE NOT NULL,
+            description TEXT DEFAULT '',
+            scope_mode TEXT NOT NULL DEFAULT 'all',
+            use_alias_email INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'active',
+            last_scope_synced_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    # 创建项目分组范围表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS project_group_scopes (
+            project_id INTEGER NOT NULL,
+            group_id INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (project_id, group_id)
+        )
+    ''')
+
+    # 创建项目账号关系表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS project_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            account_id INTEGER,
+            normalized_email TEXT NOT NULL,
+            email_snapshot TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'toClaim',
+            deleted_from_status TEXT DEFAULT '',
+            source_group_id INTEGER,
+            caller_id TEXT DEFAULT '',
+            task_id TEXT DEFAULT '',
+            claim_token TEXT,
+            claimed_at TIMESTAMP,
+            lease_expires_at TIMESTAMP,
+            last_result TEXT DEFAULT '',
+            last_result_detail TEXT DEFAULT '',
+            claim_count INTEGER NOT NULL DEFAULT 0,
+            first_claimed_at TIMESTAMP,
+            last_claimed_at TIMESTAMP,
+            done_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(project_id, normalized_email)
+        )
+    ''')
+
+    # 创建项目账号事件表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS project_account_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            account_id INTEGER,
+            normalized_email TEXT NOT NULL,
+            project_account_id INTEGER,
+            action TEXT NOT NULL,
+            from_status TEXT,
+            to_status TEXT,
+            caller_id TEXT DEFAULT '',
+            task_id TEXT DEFAULT '',
+            claim_token TEXT,
+            detail TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_project_accounts_project_status
+        ON project_accounts(project_id, status)
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_project_accounts_project_lease
+        ON project_accounts(project_id, lease_expires_at)
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_project_accounts_account_id
+        ON project_accounts(account_id)
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_project_accounts_project_email
+        ON project_accounts(project_id, normalized_email)
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_project_group_scopes_group_id
+        ON project_group_scopes(group_id)
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_project_events_project_created
+        ON project_account_events(project_id, created_at)
+    ''')
+
     # 检查并添加缺失的列（数据库迁移）
     cursor.execute("PRAGMA table_info(accounts)")
     columns = [col[1] for col in cursor.fetchall()]
 
     if 'group_id' not in columns:
         cursor.execute('ALTER TABLE accounts ADD COLUMN group_id INTEGER DEFAULT 1')
+    if 'sort_order' not in columns:
+        cursor.execute('ALTER TABLE accounts ADD COLUMN sort_order INTEGER DEFAULT 0')
     if 'remark' not in columns:
         cursor.execute('ALTER TABLE accounts ADD COLUMN remark TEXT')
     if 'status' not in columns:
@@ -880,6 +1290,12 @@ def init_db():
         cursor.execute('ALTER TABLE accounts ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP')
     if 'last_refresh_at' not in columns:
         cursor.execute('ALTER TABLE accounts ADD COLUMN last_refresh_at TIMESTAMP')
+    if 'last_refresh_status' not in columns:
+        cursor.execute("ALTER TABLE accounts ADD COLUMN last_refresh_status TEXT DEFAULT 'never'")
+    if 'last_refresh_error' not in columns:
+        cursor.execute('ALTER TABLE accounts ADD COLUMN last_refresh_error TEXT')
+    if 'refresh_token_updated_at' not in columns:
+        cursor.execute('ALTER TABLE accounts ADD COLUMN refresh_token_updated_at TIMESTAMP')
     if 'account_type' not in columns:
         cursor.execute("ALTER TABLE accounts ADD COLUMN account_type TEXT DEFAULT 'outlook'")
     if 'provider' not in columns:
@@ -924,6 +1340,80 @@ def init_db():
         cursor.execute('ALTER TABLE temp_emails ADD COLUMN cloudflare_jwt TEXT')
     if 'cloudflare_address_id' not in temp_columns:
         cursor.execute('ALTER TABLE temp_emails ADD COLUMN cloudflare_address_id TEXT')
+
+    cursor.execute("PRAGMA table_info(project_accounts)")
+    project_account_columns = [col[1] for col in cursor.fetchall()]
+    if project_account_columns:
+        if 'account_id' not in project_account_columns:
+            cursor.execute('ALTER TABLE project_accounts ADD COLUMN account_id INTEGER')
+        if 'normalized_email' not in project_account_columns:
+            cursor.execute("ALTER TABLE project_accounts ADD COLUMN normalized_email TEXT DEFAULT ''")
+        if 'email_snapshot' not in project_account_columns:
+            cursor.execute("ALTER TABLE project_accounts ADD COLUMN email_snapshot TEXT DEFAULT ''")
+        if 'status' not in project_account_columns:
+            cursor.execute("ALTER TABLE project_accounts ADD COLUMN status TEXT DEFAULT 'toClaim'")
+        if 'deleted_from_status' not in project_account_columns:
+            cursor.execute("ALTER TABLE project_accounts ADD COLUMN deleted_from_status TEXT DEFAULT ''")
+        if 'source_group_id' not in project_account_columns:
+            cursor.execute('ALTER TABLE project_accounts ADD COLUMN source_group_id INTEGER')
+        if 'caller_id' not in project_account_columns:
+            cursor.execute("ALTER TABLE project_accounts ADD COLUMN caller_id TEXT DEFAULT ''")
+        if 'task_id' not in project_account_columns:
+            cursor.execute("ALTER TABLE project_accounts ADD COLUMN task_id TEXT DEFAULT ''")
+        if 'claim_token' not in project_account_columns:
+            cursor.execute('ALTER TABLE project_accounts ADD COLUMN claim_token TEXT')
+        if 'claimed_at' not in project_account_columns:
+            cursor.execute('ALTER TABLE project_accounts ADD COLUMN claimed_at TIMESTAMP')
+        if 'lease_expires_at' not in project_account_columns:
+            cursor.execute('ALTER TABLE project_accounts ADD COLUMN lease_expires_at TIMESTAMP')
+        if 'last_result' not in project_account_columns:
+            cursor.execute("ALTER TABLE project_accounts ADD COLUMN last_result TEXT DEFAULT ''")
+        if 'last_result_detail' not in project_account_columns:
+            cursor.execute("ALTER TABLE project_accounts ADD COLUMN last_result_detail TEXT DEFAULT ''")
+        if 'claim_count' not in project_account_columns:
+            cursor.execute('ALTER TABLE project_accounts ADD COLUMN claim_count INTEGER DEFAULT 0')
+        if 'first_claimed_at' not in project_account_columns:
+            cursor.execute('ALTER TABLE project_accounts ADD COLUMN first_claimed_at TIMESTAMP')
+        if 'last_claimed_at' not in project_account_columns:
+            cursor.execute('ALTER TABLE project_accounts ADD COLUMN last_claimed_at TIMESTAMP')
+        if 'done_at' not in project_account_columns:
+            cursor.execute('ALTER TABLE project_accounts ADD COLUMN done_at TIMESTAMP')
+        if 'created_at' not in project_account_columns:
+            cursor.execute('ALTER TABLE project_accounts ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP')
+        if 'updated_at' not in project_account_columns:
+            cursor.execute('ALTER TABLE project_accounts ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP')
+
+    cursor.execute("PRAGMA table_info(projects)")
+    project_columns = [col[1] for col in cursor.fetchall()]
+    if project_columns:
+        if 'use_alias_email' not in project_columns:
+            cursor.execute('ALTER TABLE projects ADD COLUMN use_alias_email INTEGER NOT NULL DEFAULT 0')
+
+    cursor.execute("PRAGMA table_info(project_account_events)")
+    project_event_columns = [col[1] for col in cursor.fetchall()]
+    if project_event_columns:
+        if 'account_id' not in project_event_columns:
+            cursor.execute('ALTER TABLE project_account_events ADD COLUMN account_id INTEGER')
+        if 'normalized_email' not in project_event_columns:
+            cursor.execute("ALTER TABLE project_account_events ADD COLUMN normalized_email TEXT DEFAULT ''")
+        if 'project_account_id' not in project_event_columns:
+            cursor.execute('ALTER TABLE project_account_events ADD COLUMN project_account_id INTEGER')
+        if 'action' not in project_event_columns:
+            cursor.execute("ALTER TABLE project_account_events ADD COLUMN action TEXT DEFAULT ''")
+        if 'from_status' not in project_event_columns:
+            cursor.execute('ALTER TABLE project_account_events ADD COLUMN from_status TEXT')
+        if 'to_status' not in project_event_columns:
+            cursor.execute('ALTER TABLE project_account_events ADD COLUMN to_status TEXT')
+        if 'caller_id' not in project_event_columns:
+            cursor.execute("ALTER TABLE project_account_events ADD COLUMN caller_id TEXT DEFAULT ''")
+        if 'task_id' not in project_event_columns:
+            cursor.execute("ALTER TABLE project_account_events ADD COLUMN task_id TEXT DEFAULT ''")
+        if 'claim_token' not in project_event_columns:
+            cursor.execute('ALTER TABLE project_account_events ADD COLUMN claim_token TEXT')
+        if 'detail' not in project_event_columns:
+            cursor.execute("ALTER TABLE project_account_events ADD COLUMN detail TEXT DEFAULT ''")
+        if 'created_at' not in project_event_columns:
+            cursor.execute('ALTER TABLE project_account_events ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP')
     
     # 创建默认分组
     cursor.execute('''
@@ -937,19 +1427,8 @@ def init_db():
         VALUES ('临时邮箱', 'GPTMail 临时邮箱服务', '#00bcf2', 1)
     ''')
 
-    # 初始化分组排序值，保留已有顺序并确保临时邮箱固定在最前
-    cursor.execute('SELECT id, name, sort_order FROM groups ORDER BY id')
-    group_rows = cursor.fetchall()
-    next_sort_order = 1
-    for group_id, group_name, sort_order in group_rows:
-        target_sort_order = 0 if group_name == '临时邮箱' else next_sort_order
-        if group_name != '临时邮箱':
-            next_sort_order += 1
-        if sort_order != target_sort_order:
-            cursor.execute(
-                'UPDATE groups SET sort_order = ? WHERE id = ?',
-                (target_sort_order, group_id)
-            )
+    # 归一化分组排序值，临时邮箱固定在最前，其他分组保留已有相对顺序。
+    normalize_group_sort_orders_on_startup(cursor)
     
     # 初始化默认设置
     # 检查是否已有密码设置
@@ -1046,7 +1525,20 @@ def init_db():
 
     cursor.execute('''
         INSERT OR IGNORE INTO settings (key, value)
+        VALUES ('app_timezone', ?)
+    ''', (DEFAULT_APP_TIMEZONE or 'Asia/Shanghai',))
+    cursor.execute('''
+        INSERT OR IGNORE INTO settings (key, value)
+        VALUES ('show_account_created_at', 'true')
+    ''')
+
+    cursor.execute('''
+        INSERT OR IGNORE INTO settings (key, value)
         VALUES ('forward_check_interval_minutes', '5')
+    ''')
+    cursor.execute('''
+        INSERT OR IGNORE INTO settings (key, value)
+        VALUES ('forward_account_delay_seconds', '0')
     ''')
     cursor.execute('''
         INSERT OR IGNORE INTO settings (key, value)
@@ -1104,6 +1596,14 @@ def init_db():
         INSERT OR IGNORE INTO settings (key, value)
         VALUES ('telegram_chat_id', '')
     ''')
+    cursor.execute('''
+        INSERT OR IGNORE INTO settings (key, value)
+        VALUES ('telegram_proxy_url', '')
+    ''')
+    cursor.execute('''
+        INSERT OR IGNORE INTO settings (key, value)
+        VALUES ('wecom_webhook_url', '')
+    ''')
 
     # 创建索引以优化查询性能
     cursor.execute('''
@@ -1112,13 +1612,100 @@ def init_db():
     ''')
 
     cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_accounts_last_refresh_status
+        ON accounts(last_refresh_status)
+    ''')
+
+    cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_accounts_status
         ON accounts(status)
     ''')
 
     cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_accounts_sort_order
+        ON accounts(sort_order)
+    ''')
+
+    cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_account_refresh_logs_account_id
         ON account_refresh_logs(account_id)
+    ''')
+
+    cursor.execute('''
+        INSERT OR IGNORE INTO token_refresh_state (
+            scope_key, trigger_type, status, total_count, success_count, failed_count, updated_at
+        )
+        VALUES ('all_outlook', '', 'idle', 0, 0, 0, CURRENT_TIMESTAMP)
+    ''')
+
+    cursor.execute('''
+        UPDATE accounts
+        SET last_refresh_status = COALESCE(
+            NULLIF(last_refresh_status, ''),
+            (
+                SELECT l.status
+                FROM account_refresh_logs l
+                WHERE l.account_id = accounts.id
+                ORDER BY l.created_at DESC, l.id DESC
+                LIMIT 1
+            ),
+            CASE
+                WHEN last_refresh_at IS NOT NULL THEN 'success'
+                ELSE 'never'
+            END
+        )
+        WHERE last_refresh_status IS NULL OR last_refresh_status = ''
+    ''')
+
+    cursor.execute('''
+        UPDATE accounts
+        SET last_refresh_error = (
+            SELECT l.error_message
+            FROM account_refresh_logs l
+            WHERE l.account_id = accounts.id
+            ORDER BY l.created_at DESC, l.id DESC
+            LIMIT 1
+        )
+        WHERE COALESCE(last_refresh_status, 'never') = 'failed'
+          AND (last_refresh_error IS NULL OR last_refresh_error = '')
+          AND EXISTS (
+              SELECT 1
+              FROM account_refresh_logs l
+              WHERE l.account_id = accounts.id
+          )
+    ''')
+
+    cursor.execute('''
+        UPDATE accounts
+        SET last_refresh_error = NULL
+        WHERE COALESCE(last_refresh_status, 'never') != 'failed'
+          AND last_refresh_error IS NOT NULL
+    ''')
+
+    cursor.execute('''
+        UPDATE accounts
+        SET last_refresh_at = (
+            SELECT l.created_at
+            FROM account_refresh_logs l
+            WHERE l.account_id = accounts.id
+            ORDER BY l.created_at DESC, l.id DESC
+            LIMIT 1
+        )
+        WHERE EXISTS (
+            SELECT 1
+            FROM account_refresh_logs l
+            WHERE l.account_id = accounts.id
+        )
+          AND (
+              last_refresh_at IS NULL OR
+              last_refresh_at < (
+                  SELECT l.created_at
+                  FROM account_refresh_logs l
+                  WHERE l.account_id = accounts.id
+                  ORDER BY l.created_at DESC, l.id DESC
+                  LIMIT 1
+              )
+          )
     ''')
 
     cursor.execute('''
@@ -1262,6 +1849,37 @@ def get_setting_decrypted(key: str, default: str = '') -> str:
         return decrypt_data(value)
     except Exception:
         return value
+
+
+def is_valid_app_timezone_name(value: str) -> bool:
+    candidate = str(value or '').strip()
+    if not candidate:
+        return False
+    try:
+        ZoneInfo(candidate)
+        return True
+    except Exception:
+        return False
+
+
+def normalize_app_timezone_name(value: str, default: str = DEFAULT_APP_TIMEZONE) -> str:
+    candidate = str(value or '').strip()
+    if is_valid_app_timezone_name(candidate):
+        return candidate
+
+    fallback = str(default or '').strip()
+    if is_valid_app_timezone_name(fallback):
+        return fallback
+
+    return FALLBACK_APP_TIMEZONE
+
+
+def get_app_timezone() -> str:
+    return normalize_app_timezone_name(get_setting('app_timezone', DEFAULT_APP_TIMEZONE))
+
+
+def get_app_timezone_info():
+    return ZoneInfo(get_app_timezone())
 
 
 def get_all_settings() -> Dict[str, str]:

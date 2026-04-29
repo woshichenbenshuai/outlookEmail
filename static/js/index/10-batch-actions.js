@@ -1,4 +1,4 @@
-        /* global accountsCache, clearEmailSelection, closeModal, currentGroupId, currentAccount, currentEmailDetail, deleteAccount, getSelectedForwardChannels, handleApiError, hideModal, invalidateAccountCaches, isTempEmailGroup, loadAccountsByGroup, loadGroups, loadTags, refreshVisibleAccountList, renderEmailList, selectedEmailIds, setModalVisible, showModal, showToast, updateBatchActionBar */
+        /* global accountsCache, clearEmailSelection, closeModal, copyTextToClipboard, currentAccount, currentAccountListSource, currentEmailDetail, currentGroupId, deleteAccount, getSelectedForwardChannels, handleApiError, hideModal, invalidateAccountCaches, isTempEmailGroup, loadAccountsByGroup, loadGroups, loadTags, refreshVisibleAccountList, renderEmailList, selectedEmailIds, setModalVisible, showModal, showToast, updateBatchActionBar */
 
         // ==================== 批量操作 ====================
 
@@ -10,8 +10,12 @@
             const countSpan = document.getElementById('selectedCount');
             const selectAllBtn = document.getElementById('accountSelectAllBtn');
             const batchRefreshBtn = document.getElementById('batchRefreshTokensBtn');
+            const batchCopyBtn = document.getElementById('batchCopyEmailsBtn');
             const batchEnableForwardingBtn = document.getElementById('batchEnableForwardingBtn');
             const batchDisableForwardingBtn = document.getElementById('batchDisableForwardingBtn');
+            const batchAddTagBtn = document.getElementById('batchAddTagBtn');
+            const batchRemoveTagBtn = document.getElementById('batchRemoveTagBtn');
+            const batchMoveGroupBtn = document.getElementById('batchMoveGroupBtn');
             const batchDeleteBtn = document.getElementById('batchDeleteAccountsBtn');
             const panel = document.getElementById('accountPanel');
             const refreshableChecked = checked.filter(cb => cb.dataset.refreshable === 'true');
@@ -19,13 +23,24 @@
             const disableForwardingChecked = checked.filter(cb => cb.dataset.forwardEnabled === 'true');
             const isForwardingUpdating = batchEnableForwardingBtn?.dataset.loading === 'true'
                 || batchDisableForwardingBtn?.dataset.loading === 'true';
+            const isTempContext = !!isTempEmailGroup;
+
+            if (batchRefreshBtn) batchRefreshBtn.style.display = isTempContext ? 'none' : 'inline-flex';
+            if (batchEnableForwardingBtn) batchEnableForwardingBtn.style.display = isTempContext ? 'none' : 'inline-flex';
+            if (batchDisableForwardingBtn) batchDisableForwardingBtn.style.display = isTempContext ? 'none' : 'inline-flex';
+            if (batchMoveGroupBtn) batchMoveGroupBtn.style.display = isTempContext ? 'none' : 'inline-flex';
+            if (batchAddTagBtn) batchAddTagBtn.style.display = 'inline-flex';
+            if (batchRemoveTagBtn) batchRemoveTagBtn.style.display = 'inline-flex';
+            if (batchDeleteBtn) batchDeleteBtn.style.display = 'inline-flex';
 
             if (checked.length > 0) {
                 bar.style.display = 'flex';
                 panel?.classList.add('batch-toolbar-active');
-                countSpan.textContent = refreshableChecked.length > 0 && refreshableChecked.length !== checked.length
+                countSpan.textContent = isTempContext
+                    ? `已选 ${checked.length} 项`
+                    : (refreshableChecked.length > 0 && refreshableChecked.length !== checked.length
                     ? `已选 ${checked.length} 项，可刷新 ${refreshableChecked.length} 项`
-                    : `已选 ${checked.length} 项`;
+                    : `已选 ${checked.length} 项`);
                 if (selectAllBtn) {
                     selectAllBtn.textContent = allCheckboxes.length > 0 && checked.length === allCheckboxes.length
                         ? '取消全选'
@@ -41,6 +56,15 @@
                         batchRefreshBtn.textContent = refreshableChecked.length > 0
                             ? `刷新 Token${refreshableChecked.length !== checked.length ? ` (${refreshableChecked.length})` : ''}`
                             : '刷新 Token';
+                    }
+                }
+                if (batchCopyBtn) {
+                    const isCopying = batchCopyBtn.dataset.loading === 'true';
+                    batchCopyBtn.disabled = checked.length === 0 || isCopying;
+                    if (!isCopying) {
+                        batchCopyBtn.textContent = isTempContext
+                            ? (checked.length > 1 ? `复制邮箱 (${checked.length})` : '复制邮箱')
+                            : (checked.length > 1 ? `复制邮箱+别名 (${checked.length})` : '复制邮箱+别名');
                     }
                 }
                 if (batchEnableForwardingBtn) {
@@ -81,6 +105,12 @@
                     batchRefreshBtn.textContent = '刷新 Token';
                     batchRefreshBtn.title = '';
                 }
+                if (batchCopyBtn) {
+                    batchCopyBtn.disabled = false;
+                    batchCopyBtn.dataset.loading = 'false';
+                    batchCopyBtn.textContent = isTempContext ? '复制邮箱' : '复制邮箱+别名';
+                    batchCopyBtn.title = '';
+                }
                 if (batchEnableForwardingBtn) {
                     batchEnableForwardingBtn.disabled = false;
                     batchEnableForwardingBtn.dataset.loading = 'false';
@@ -119,14 +149,65 @@
             updateBatchActionBar();
         }
 
+        function getSelectedAccountIds() {
+            return Array.from(document.querySelectorAll('#accountList .account-select-checkbox:checked'))
+                .map(cb => parseInt(cb.value, 10))
+                .filter(Number.isFinite);
+        }
+
+        function getSelectedAccounts() {
+            const selectedIds = new Set(getSelectedAccountIds());
+            if (!selectedIds.size) {
+                return [];
+            }
+
+            return (Array.isArray(currentAccountListSource) ? currentAccountListSource : [])
+                .filter(account => selectedIds.has(parseInt(account.id, 10)));
+        }
+
+        async function copySelectedAccountsWithAliases() {
+            const btn = document.getElementById('batchCopyEmailsBtn');
+            if (!btn || btn.disabled) return;
+
+            const selectedAccounts = getSelectedAccounts();
+            if (!selectedAccounts.length) {
+                showToast('请先选择要复制的邮箱', 'error');
+                return;
+            }
+
+            const emailSet = new Set();
+            selectedAccounts.forEach(account => {
+                const candidates = [account.email].concat(Array.isArray(account.aliases) ? account.aliases : []);
+                candidates
+                    .map(value => String(value || '').trim())
+                    .filter(Boolean)
+                    .forEach(email => emailSet.add(email));
+            });
+
+            const emailList = Array.from(emailSet);
+            if (!emailList.length) {
+                showToast('所选账号没有可复制的邮箱', 'error');
+                return;
+            }
+
+            btn.disabled = true;
+            btn.dataset.loading = 'true';
+            btn.textContent = '复制中...';
+
+            try {
+                await copyTextToClipboard(emailList.join('\n'), `已复制 ${emailList.length} 个邮箱地址`);
+            } finally {
+                btn.dataset.loading = 'false';
+                updateBatchActionBar();
+            }
+        }
+
         async function refreshSelectedAccounts() {
             const btn = document.getElementById('batchRefreshTokensBtn');
             if (!btn || btn.disabled) return;
 
             const checked = Array.from(document.querySelectorAll('#accountList .account-select-checkbox:checked'));
-            const accountIds = checked
-                .map(cb => parseInt(cb.value, 10))
-                .filter(Number.isFinite);
+            const accountIds = getSelectedAccountIds();
             const refreshableCount = checked.filter(cb => cb.dataset.refreshable === 'true').length;
 
             if (!accountIds.length) {
@@ -137,7 +218,7 @@
                 showToast('所选账号中没有可刷新的 Outlook 账号', 'error');
                 return;
             }
-            if (!confirm(`确定要刷新所选 ${accountIds.length} 个邮箱的 Token 吗？`)) {
+            if (!(await showConfirmModal(`确定要刷新所选 ${accountIds.length} 个邮箱的 Token 吗？`, { title: '批量刷新 Token', confirmText: '确认刷新', danger: false }))) {
                 return;
             }
 
@@ -165,8 +246,7 @@
                 );
 
                 if (data.failed_count > 0) {
-                    await showRefreshModal(false);
-                    showFailedListFromData(data.failed_list || []);
+                    await openRefreshModalWithStatus('failed');
                 } else {
                     loadRefreshStats();
                 }
@@ -208,7 +288,7 @@
             const confirmMessage = skippedCount > 0
                 ? `确定要为所选 ${accountIds.length} 个邮箱${actionLabel}吗？其中 ${skippedCount} 个${skippedLabel}账号会自动跳过。`
                 : `确定要为所选 ${accountIds.length} 个邮箱${actionLabel}吗？`;
-            if (!confirm(confirmMessage)) {
+            if (!(await showConfirmModal(confirmMessage, { title: actionLabel, confirmText: '确认', danger: false }))) {
                 return;
             }
 
@@ -263,13 +343,15 @@
             const accountEmails = checked
                 .map(cb => cb.dataset.accountEmail || '')
                 .filter(Boolean);
+            const isTempContext = !!isTempEmailGroup;
 
             if (!accountIds.length) {
-                showToast('请先选择要删除的邮箱', 'error');
+                showToast(isTempContext ? '请先选择要删除的临时邮箱' : '请先选择要删除的邮箱', 'error');
                 return;
             }
 
-            if (!confirm(`确定要删除所选 ${accountIds.length} 个邮箱吗？此操作不可恢复。`)) {
+            const resourceLabel = isTempContext ? '临时邮箱' : '邮箱';
+            if (!(await showConfirmModal(`确定要删除所选 ${accountIds.length} 个${resourceLabel}吗？此操作不可恢复。`, { title: `批量删除${resourceLabel}`, confirmText: '确认删除' }))) {
                 return;
             }
 
@@ -278,10 +360,12 @@
             btn.textContent = '删除中...';
 
             try {
-                const response = await fetch('/api/accounts/batch-delete', {
+                const response = await fetch(isTempContext ? '/api/temp-emails/batch-delete' : '/api/accounts/batch-delete', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ account_ids: accountIds })
+                    body: JSON.stringify(isTempContext
+                        ? { temp_email_ids: accountIds }
+                        : { account_ids: accountIds })
                 });
                 const data = await response.json();
 
@@ -290,12 +374,16 @@
                     return;
                 }
 
-                const deletedEmails = Array.isArray(data.deleted_accounts)
-                    ? data.deleted_accounts.map(item => item.email).filter(Boolean)
+                const deletedEmails = Array.isArray(isTempContext ? data.deleted_emails : data.deleted_accounts)
+                    ? (isTempContext ? data.deleted_emails : data.deleted_accounts).map(item => item.email).filter(Boolean)
                     : accountEmails;
 
-                showToast(data.message || `已删除 ${deletedEmails.length} 个账号`, 'success');
-                invalidateAccountCaches();
+                showToast(data.message || `已删除 ${deletedEmails.length} 个${resourceLabel}`, 'success');
+                if (isTempContext) {
+                    delete accountsCache.temp;
+                } else {
+                    invalidateAccountCaches();
+                }
                 resetSelectedAccountViewIfDeleted(deletedEmails);
                 clearAccountSelection();
                 loadGroups();
@@ -313,7 +401,10 @@
         // 显示批量打标模态框
         async function showBatchTagModal(type) {
             batchActionType = type;
-            document.getElementById('batchTagTitle').textContent = type === 'add' ? '批量添加标签' : '批量移除标签';
+            const resourceLabel = isTempEmailGroup ? '临时邮箱' : '账号';
+            document.getElementById('batchTagTitle').textContent = type === 'add'
+                ? `批量给${resourceLabel}添加标签`
+                : `批量移除${resourceLabel}标签`;
             showModal('batchTagModal');
 
             // 加载标签选项
@@ -358,14 +449,21 @@
             if (accountIds.length === 0) return;
 
             try {
-                const response = await fetch('/api/accounts/tags', {
+                const isTempContext = !!isTempEmailGroup;
+                const response = await fetch(isTempContext ? '/api/temp-emails/tags' : '/api/accounts/tags', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        account_ids: accountIds,
-                        tag_id: parseInt(tagId),
-                        action: batchActionType
-                    })
+                    body: JSON.stringify(isTempContext
+                        ? {
+                            temp_email_ids: accountIds,
+                            tag_id: parseInt(tagId, 10),
+                            action: batchActionType
+                        }
+                        : {
+                            account_ids: accountIds,
+                            tag_id: parseInt(tagId, 10),
+                            action: batchActionType
+                        })
                 });
 
                 const data = await response.json();
@@ -407,7 +505,7 @@
                 if (data.success) {
                     let html = '<option value="">请选择分组...</option>';
                     data.groups.filter(g => !g.is_system).forEach(group => {
-                        html += `<option value="${group.id}">${escapeHtml(group.name)}</option>`;
+                        html += `<option value="${group.id}">${escapeHtml(normalizeGroupName(group.name))}</option>`;
                     });
                     select.innerHTML = html;
                 }

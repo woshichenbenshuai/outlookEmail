@@ -1,4 +1,4 @@
-        /* global accountsCache, closeAllModals, currentAccount, currentAccountListSource, currentEmailDetail, currentEmailId, currentEmails, currentGroupId, currentSkip, currentSortBy, currentSortOrder, deleteAccount, editingGroupId, escapeHtml, formatRelativeTime, generateTempEmail, groups, handleApiError, hasMoreEmails, hideModal, isMobileLayout, isTempEmailGroup, loadTempEmails, localStorage, openMobilePanel, resetSelectedAccountView, selectedColor, selectedTagFilters, setModalVisible, showAddAccountModal, showGetRefreshTokenModal, showModal, showRefreshError, showTagManagementModal, showToast, suppressGroupClickUntil, tempEmailGroupId, updateCurrentGroupHeader, updateMobileContext */
+        /* global accountsCache, closeAllModals, currentAccount, currentAccountListSource, currentEmailDetail, currentEmailId, currentEmails, currentGroupId, currentSkip, currentSortBy, currentSortOrder, deleteAccount, editingGroupId, escapeHtml, formatAbsoluteDateTime, generateTempEmail, groups, handleApiError, hasMoreEmails, hideModal, isMobileLayout, isTempEmailGroup, loadTempEmails, localStorage, matchesSelectedTagFilters, normalizeTagFilterSelectionValue, openMobilePanel, renderEmptyStateMarkup, renderTempEmailList, resetSelectedAccountView, selectedColor, selectedTagFilters, setModalVisible, shouldShowAccountCreatedAt, showAddAccountModal, showGetRefreshTokenModal, showModal, showRefreshError, showTagManagementModal, showToast, suppressGroupClickUntil, tempEmailGroupId, updateCurrentGroupHeader, updateMobileContext */
 
         // ==================== 分组相关 ====================
 
@@ -54,9 +54,17 @@
                     }
 
                     updateMobileContext();
+                } else {
+                    container.innerHTML = renderEmptyStateMarkup('⚠️', data.error || '加载失败', {
+                        onAction: 'loadGroups()',
+                        actionTitle: '刷新分组列表'
+                    });
                 }
             } catch (error) {
-                container.innerHTML = '<div class="empty-state"><div class="empty-state-text">加载失败</div></div>';
+                container.innerHTML = renderEmptyStateMarkup('⚠️', '加载失败', {
+                    onAction: 'loadGroups()',
+                    actionTitle: '刷新分组列表'
+                });
                 showToast('加载分组失败', 'error');
             }
         }
@@ -66,11 +74,10 @@
             const container = document.getElementById('groupList');
 
             if (groups.length === 0) {
-                container.innerHTML = `
-                    <div class="empty-state" style="padding: 40px 20px;">
-                        <div class="empty-state-text">暂无分组</div>
-                    </div>
-                `;
+                container.innerHTML = renderEmptyStateMarkup('📁', '暂无分组', {
+                    onAction: 'loadGroups()',
+                    actionTitle: '刷新分组列表'
+                });
                 return;
             }
 
@@ -79,6 +86,8 @@
                 const isTempGroup = group.name === '临时邮箱';
                 const isDefault = group.id === 1;
                 const isDragging = groupDragState.isDragging && groupDragState.groupId === group.id;
+                const groupName = normalizeGroupName(group.name);
+                const groupIdBadgeText = formatGroupIdBadgeText(group.id);
 
                 return `
                     <div class="group-item ${currentGroupId === group.id ? 'active' : ''} ${isTempGroup ? 'temp-email-group' : ''} ${!isTempGroup ? 'draggable' : ''} ${isDragging ? 'dragging' : ''}"
@@ -87,11 +96,11 @@
                          onclick="handleGroupClick(event, ${group.id})">
                         <div class="group-row-1">
                             <div class="group-color" style="background-color: ${group.color || '#666'}"></div>
-                            <span class="group-name">${escapeHtml(group.name)}${isTempGroup ? ' ⚡' : ''}</span>
+                            <span class="group-name">${escapeHtml(groupName)}${isTempGroup ? ' ⚡' : ''}</span>
                         </div>
                         <div class="group-row-2">
                             <div class="group-meta">
-                                <span class="group-id-badge">groupId ${group.id}</span>
+                                ${groupIdBadgeText ? `<span class="group-id-badge">${escapeHtml(groupIdBadgeText)}</span>` : ''}
                                 <span class="group-count">${group.account_count || 0} 个邮箱</span>
                             </div>
                             <div class="group-actions">
@@ -423,9 +432,13 @@
         // 更新账号面板头部动作按钮
         function updateAccountPanelActions() {
             const actions = document.querySelector('.account-panel-header-actions');
+            const searchInput = document.getElementById('globalSearch');
             if (!actions) return;
             if (isTempEmailGroup) {
                 actions.innerHTML = `
+                    <button class="panel-action-btn" onclick="showTagManagementModal()" title="管理标签">
+                        🏷️
+                    </button>
                     <button class="panel-action-btn panel-action-btn-accent" onclick="generateTempEmail()" title="生成临时邮箱">
                         ⚡
                     </button>
@@ -436,15 +449,18 @@
                         </svg>
                     </button>
                 `;
-                // 显示渠道筛选、隐藏排序和标签
+                // 显示渠道筛选、隐藏排序
                 document.getElementById('tempEmailProviderFilter').style.display = 'flex';
                 document.querySelector('.sort-control').style.display = 'none';
-                document.getElementById('tagFilterContainer').style.display = 'none';
+                updateTagFilter();
                 // 同步筛选按钮样式
                 const currentFilter = localStorage.getItem('outlook_temp_email_filter') || 'all';
                 document.querySelectorAll('.provider-filter-btn').forEach(btn => {
                     btn.classList.toggle('active', btn.dataset.provider === currentFilter);
                 });
+                if (searchInput) {
+                    searchInput.placeholder = '搜索临时邮箱地址或标签...';
+                }
             } else {
                 actions.innerHTML = `
                     <button class="panel-action-btn" onclick="showTagManagementModal()" title="管理标签">
@@ -464,6 +480,9 @@
                 document.getElementById('tempEmailProviderFilter').style.display = 'none';
                 document.querySelector('.sort-control').style.display = 'flex';
                 updateTagFilter();
+                if (searchInput) {
+                    searchInput.placeholder = '搜索邮箱地址、别名、备注或标签...';
+                }
             }
         }
 
@@ -508,9 +527,17 @@
                     // 缓存数据
                     accountsCache[groupId] = data.accounts;
                     renderFilteredAccountList(data.accounts);
+                } else {
+                    container.innerHTML = renderEmptyStateMarkup('⚠️', data.error || '加载失败', {
+                        onAction: `loadAccountsByGroup(${Number(groupId)}, true)`,
+                        actionTitle: '刷新账号列表'
+                    });
                 }
             } catch (error) {
-                container.innerHTML = '<div class="empty-state"><div class="empty-state-text">加载失败</div></div>';
+                container.innerHTML = renderEmptyStateMarkup('⚠️', '加载失败', {
+                    onAction: `loadAccountsByGroup(${Number(groupId)}, true)`,
+                    actionTitle: '刷新账号列表'
+                });
             }
         }
 
@@ -552,13 +579,14 @@
         function renderAccountGroupSummary(account, showGroupInfo = false) {
             if (!showGroupInfo) return '';
 
-            const groupName = String(account.group_name || '默认分组').trim() || '默认分组';
             const groupColor = account.group_color || '#666666';
+            const groupName = normalizeGroupName(account.group_name, '默认分组');
+            const groupIdBadgeText = formatGroupIdBadgeText(account.group_id);
             return `
                 <div class="account-group-summary" title="所属分组: ${escapeHtml(groupName)}">
                     <span class="account-group-dot" style="background-color: ${escapeHtml(groupColor)}"></span>
-                    <span class="account-group-label">分组:</span>
                     <span class="account-group-name">${escapeHtml(groupName)}</span>
+                    ${groupIdBadgeText ? `<span class="group-id-badge account-group-id-badge">${escapeHtml(groupIdBadgeText)}</span>` : ''}
                 </div>
             `;
         }
@@ -587,19 +615,23 @@
         function renderAccountList(accounts) {
             const container = document.getElementById('accountList');
             const isSearchMode = !!(document.getElementById('globalSearch')?.value || '').trim();
+            const normalizedGroupId = Number(currentGroupId);
+            const refreshAction = Number.isFinite(normalizedGroupId) && normalizedGroupId > 0
+                ? `loadAccountsByGroup(${normalizedGroupId}, true)`
+                : '';
 
             if (accounts.length === 0) {
-                container.innerHTML = `
-                    <div class="empty-state">
-                        <div class="empty-state-icon">📭</div>
-                        <div class="empty-state-text">${isSearchMode ? '未找到匹配邮箱' : '该分组暂无邮箱'}</div>
-                    </div>
-                `;
+                container.innerHTML = isSearchMode
+                    ? renderEmptyStateMarkup('📭', '未找到匹配邮箱')
+                    : renderEmptyStateMarkup('📭', '该分组暂无邮箱', {
+                        onAction: refreshAction,
+                        actionTitle: '刷新账号列表'
+                    });
                 updateBatchActionBar();
                 return;
             }
 
-            container.innerHTML = accounts.map((acc, index) => `
+            container.innerHTML = accounts.map(acc => `
                 <div class="account-item ${currentAccount === acc.email ? 'active' : ''} ${acc.status === 'inactive' ? 'inactive' : ''}"
                      onclick="handleAccountItemClick(event, '${escapeJs(acc.email)}')">
                     <input type="checkbox" class="account-select-checkbox" value="${acc.id}" 
@@ -611,7 +643,6 @@
                     <div class="account-body">
                         <div class="account-title-row">
                             <div class="account-email-wrap">
-                                <span class="account-email-index">${index + 1}.</span>
                                 <div class="account-email" title="${escapeHtml(acc.email)}" style="${acc.last_refresh_status === 'failed' ? 'color: #b42318;' : ''}">
                                     ${escapeHtml(acc.email)}
                                 </div>
@@ -630,12 +661,7 @@
                         ${renderAccountAliasSummary(acc.aliases)}
                         ${acc.remark && acc.remark.trim() ? `<div class="account-remark" title="${escapeHtml(acc.remark)}">${escapeHtml(acc.remark)}</div>` : ''}
                         ${(acc.tags || []).length ? `<div class="account-tags">${renderAccountTagSummary(acc.tags)}</div>` : ''}
-                        <div class="account-refresh-row">
-                            <span class="account-refresh-meta ${acc.last_refresh_status === 'failed' ? 'failed' : ''}">
-                                ${formatRelativeTime(acc.last_refresh_at)}
-                            </span>
-                            ${acc.last_refresh_status === 'failed' ? '<button class="account-error-btn" onclick="event.stopPropagation(); showRefreshError(' + acc.id + ', \'' + escapeJs(acc.last_refresh_error || '未知错误') + '\', \'' + escapeJs(acc.email) + '\')">查看错误</button>' : ''}
-                        </div>
+                        ${renderAccountFooter(acc)}
                     </div>
                     <div class="account-menu-wrap">
                         <button class="account-menu-trigger" type="button" data-account-menu-toggle="true" title="更多操作">⋯</button>
@@ -653,8 +679,13 @@
         }
 
         // 排序相关变量
-        let currentSortBy = 'refresh_time';
-        let currentSortOrder = 'asc';
+        const ACCOUNT_SORT_DEFAULT_ORDERS = {
+            sort_order: 'asc',
+            created_at: 'desc',
+            email: 'asc'
+        };
+        let currentSortBy = 'sort_order';
+        let currentSortOrder = ACCOUNT_SORT_DEFAULT_ORDERS[currentSortBy];
         let suppressGroupClickUntil = 0;
         function createGroupDragState() {
             return {
@@ -673,6 +704,44 @@
         }
         let groupDragState = createGroupDragState();
 
+        function renderAccountFooter(acc) {
+            const footerParts = [];
+            if (shouldShowAccountCreatedAt() && acc.created_at) {
+                footerParts.push(`<span class="account-created-at" title="${escapeHtml(acc.created_at || '')}">${escapeHtml(formatAbsoluteDateTime(acc.created_at))}</span>`);
+            }
+            if (acc.last_refresh_status === 'failed') {
+                footerParts.push('<button class="account-error-btn" onclick="event.stopPropagation(); showRefreshError(' + acc.id + ', \'' + escapeJs(acc.last_refresh_error || '未知错误') + '\', \'' + escapeJs(acc.email) + '\')">查看错误</button>');
+            }
+            if (!footerParts.length) {
+                return '';
+            }
+            return `<div class="account-refresh-row">${footerParts.join('')}</div>`;
+        }
+
+        function getAccountSortOrderValue(account) {
+            const value = parseInt(account?.sort_order, 10);
+            return Number.isFinite(value) && value > 0 ? value : null;
+        }
+
+        function getAccountCreatedAtValue(account) {
+            const value = Date.parse(account?.created_at || '');
+            return Number.isNaN(value) ? 0 : value;
+        }
+
+        function compareAccountsByCreatedAt(a, b, order = 'desc') {
+            const createdA = getAccountCreatedAtValue(a);
+            const createdB = getAccountCreatedAtValue(b);
+            return order === 'asc' ? createdA - createdB : createdB - createdA;
+        }
+
+        function compareAccountsByEmail(a, b, order = 'asc') {
+            const emailA = String(a?.email || '').toLowerCase();
+            const emailB = String(b?.email || '').toLowerCase();
+            return order === 'asc'
+                ? emailA.localeCompare(emailB)
+                : emailB.localeCompare(emailA);
+        }
+
         // 排序账号列表
         function sortAccounts(sortBy) {
             // 如果点击同一个排序按钮，切换排序顺序
@@ -680,7 +749,7 @@
                 currentSortOrder = currentSortOrder === 'asc' ? 'desc' : 'asc';
             } else {
                 currentSortBy = sortBy;
-                currentSortOrder = sortBy === 'refresh_time' ? 'asc' : 'asc';
+                currentSortOrder = ACCOUNT_SORT_DEFAULT_ORDERS[sortBy] || 'asc';
             }
 
             // 更新按钮状态
@@ -717,11 +786,15 @@
         }
 
         function refreshVisibleAccountList(forceRefresh = false) {
+            if (currentGroupId && isTempEmailGroup) {
+                return loadTempEmails(forceRefresh);
+            }
+
             const searchQuery = (document.getElementById('globalSearch')?.value || '').trim();
             if (searchQuery) {
                 return searchAccounts(searchQuery);
             }
-            if (currentGroupId && !isTempEmailGroup) {
+            if (currentGroupId) {
                 return loadAccountsByGroup(currentGroupId, forceRefresh);
             }
             return Promise.resolve();
@@ -792,27 +865,46 @@
             }
 
             // 1. Tag 筛选
-            const selectedTagIds = Array.from(selectedTagFilters);
-            if (selectedTagIds.length > 0) {
-                result = result.filter(acc => {
-                    if (!acc.tags) return false;
-                    return acc.tags.some(t => selectedTagIds.includes(t.id));
-                });
+            if (selectedTagFilters.size > 0) {
+                result = result.filter(acc => matchesSelectedTagFilters(acc.tags));
             }
 
             // 2. 排序
             return result.sort((a, b) => {
-                if (currentSortBy === 'refresh_time') {
-                    const timeA = a.last_refresh_at ? new Date(a.last_refresh_at) : new Date(0);
-                    const timeB = b.last_refresh_at ? new Date(b.last_refresh_at) : new Date(0);
-                    return currentSortOrder === 'asc' ? timeA - timeB : timeB - timeA;
-                } else {
-                    const emailA = a.email.toLowerCase();
-                    const emailB = b.email.toLowerCase();
-                    return currentSortOrder === 'asc'
-                        ? emailA.localeCompare(emailB)
-                        : emailB.localeCompare(emailA);
+                if (currentSortBy === 'sort_order') {
+                    const sortA = getAccountSortOrderValue(a);
+                    const sortB = getAccountSortOrderValue(b);
+                    const hasSortA = sortA !== null;
+                    const hasSortB = sortB !== null;
+
+                    if (hasSortA !== hasSortB) {
+                        return hasSortA ? -1 : 1;
+                    }
+
+                    if (hasSortA && hasSortB && sortA !== sortB) {
+                        return currentSortOrder === 'asc' ? sortA - sortB : sortB - sortA;
+                    }
+
+                    const createdCompare = compareAccountsByCreatedAt(a, b, 'desc');
+                    if (createdCompare !== 0) {
+                        return createdCompare;
+                    }
+                    return compareAccountsByEmail(a, b, 'asc');
                 }
+
+                if (currentSortBy === 'created_at') {
+                    const createdCompare = compareAccountsByCreatedAt(a, b, currentSortOrder);
+                    if (createdCompare !== 0) {
+                        return createdCompare;
+                    }
+                    return compareAccountsByEmail(a, b, 'asc');
+                }
+
+                const emailCompare = compareAccountsByEmail(a, b, currentSortOrder);
+                if (emailCompare !== 0) {
+                    return emailCompare;
+                }
+                return compareAccountsByCreatedAt(a, b, 'desc');
             });
         }
 
@@ -821,8 +913,8 @@
             const selected = document.querySelectorAll('.tag-filter-checkbox:checked');
             selectedTagFilters = new Set(
                 Array.from(selected)
-                    .map(cb => parseInt(cb.value, 10))
-                    .filter(Number.isFinite)
+                    .map(cb => normalizeTagFilterSelectionValue(cb.value))
+                    .filter(value => value !== null)
             );
             document.querySelectorAll('.tag-filter-option').forEach(option => {
                 const checkbox = option.querySelector('.tag-filter-checkbox');
@@ -830,9 +922,17 @@
             });
             updateTagFilterSummary();
             if (currentAccountListSource.length) {
-                renderFilteredAccountList(currentAccountListSource);
-            } else if (currentGroupId && !isTempEmailGroup) {
-                loadAccountsByGroup(currentGroupId);
+                if (isTempEmailGroup) {
+                    renderTempEmailList(currentAccountListSource);
+                } else {
+                    renderFilteredAccountList(currentAccountListSource);
+                }
+            } else if (currentGroupId) {
+                if (isTempEmailGroup) {
+                    loadTempEmails();
+                } else {
+                    loadAccountsByGroup(currentGroupId);
+                }
             }
         }
 
@@ -857,6 +957,15 @@
                     loadTempEmails();
                 } else {
                     loadAccountsByGroup(currentGroupId);
+                }
+                return;
+            }
+
+            if (isTempEmailGroup) {
+                if (accountsCache['temp']) {
+                    renderTempEmailList(accountsCache['temp']);
+                } else {
+                    await loadTempEmails();
                 }
                 return;
             }
@@ -891,7 +1000,7 @@
                         : groups;
 
                     select.innerHTML = filteredGroups.map(g =>
-                        `<option value="${g.id}">${escapeHtml(g.name)}</option>`
+                        `<option value="${g.id}">${escapeHtml(normalizeGroupName(g.name))}</option>`
                     ).join('');
                     // 恢复之前的选择
                     if (currentValue && filteredGroups.find(g => g.id === parseInt(currentValue))) {
@@ -927,6 +1036,7 @@
             '126': '126',
             yahoo: 'Yahoo',
             aliyun: 'Aliyun',
+            '2925': '2925邮箱',
             custom: 'Custom IMAP'
         };
 
@@ -945,7 +1055,10 @@
                 email: 'smtp',
                 smtp: 'smtp',
                 tg: 'telegram',
-                telegram: 'telegram'
+                telegram: 'telegram',
+                wecom: 'wecom',
+                wechatwork: 'wecom',
+                qywx: 'wecom'
             };
             const values = Array.isArray(rawChannels)
                 ? rawChannels
@@ -959,8 +1072,13 @@
         }
 
         function getSelectedForwardChannels() {
-            return ['smtp', 'telegram'].filter(channel =>
-                document.getElementById(`forwardChannel${channel === 'smtp' ? 'Smtp' : 'Telegram'}`)?.checked
+            const checkboxMap = {
+                smtp: 'forwardChannelSmtp',
+                telegram: 'forwardChannelTelegram',
+                wecom: 'forwardChannelWecom',
+            };
+            return Object.keys(checkboxMap).filter(channel =>
+                document.getElementById(checkboxMap[channel])?.checked
             );
         }
 
@@ -968,8 +1086,10 @@
             const channels = normalizeForwardChannels(rawChannels);
             const smtpCheckbox = document.getElementById('forwardChannelSmtp');
             const telegramCheckbox = document.getElementById('forwardChannelTelegram');
+            const wecomCheckbox = document.getElementById('forwardChannelWecom');
             if (smtpCheckbox) smtpCheckbox.checked = channels.includes('smtp');
             if (telegramCheckbox) telegramCheckbox.checked = channels.includes('telegram');
+            if (wecomCheckbox) wecomCheckbox.checked = channels.includes('wecom');
             syncForwardChannelUI();
         }
 
@@ -1081,7 +1201,7 @@
                     inputEl.placeholder = '邮箱----密码';
                     if (exampleEl) {
                         exampleEl.style.display = '';
-                        exampleEl.textContent = '示例：\\nuser@duck.com----mypassword\\nuser2@duck.com----password2';
+                        exampleEl.textContent = '示例：\nuser@duck.com----mypassword\nuser2@duck.com----password2';
                     }
                     return;
                 }
@@ -1090,7 +1210,7 @@
                     inputEl.placeholder = '邮箱----JWT';
                     if (exampleEl) {
                         exampleEl.style.display = '';
-                        exampleEl.textContent = '示例：\\nuser@example.com----eyJhbGciOi...';
+                        exampleEl.textContent = '示例：\nuser@example.com----eyJhbGciOi...';
                     }
                     return;
                 }
@@ -1098,7 +1218,7 @@
                 inputEl.placeholder = '每行一个邮箱地址';
                 if (exampleEl) {
                     exampleEl.style.display = '';
-                    exampleEl.textContent = '示例：\\nuser1@gptmail.com\\nuser2@gptmail.com';
+                    exampleEl.textContent = '示例：\nuser1@gptmail.com\nuser2@gptmail.com';
                 }
                 return;
             }
@@ -1112,7 +1232,7 @@
                 hintEl.textContent = 'Outlook 支持两种格式并自动识别：邮箱----密码----client_id----refresh_token 或 邮箱----密码----refresh_token----client_id。';
                 inputEl.placeholder = '邮箱----密码----client_id----refresh_token';
                 if (exampleEl) {
-                    exampleEl.textContent = '示例：\\nuser@outlook.com----password123----24d9a0ed-8787-4584-883c-2fd79308940a----0.AXEA...\\nuser@outlook.com----password123----0.AXEA...----24d9a0ed-8787-4584-883c-2fd79308940a';
+                    exampleEl.textContent = '示例：\nuser@outlook.com----password123----24d9a0ed-8787-4584-883c-2fd79308940a----0.AXEA...\nuser@outlook.com----password123----0.AXEA...----24d9a0ed-8787-4584-883c-2fd79308940a';
                 }
                 return;
             }
@@ -1123,7 +1243,7 @@
                 if (exampleEl) {
                     const host = customHost?.value?.trim() || 'imap.example.com';
                     const port = customPort?.value?.trim() || '993';
-                    exampleEl.textContent = `示例：\\nuser@example.com----app-password\\nuser@example.com----app-password----${host}----${port}`;
+                    exampleEl.textContent = `示例：\nuser@example.com----app-password\nuser@example.com----app-password----${host}----${port}`;
                 }
                 return;
             }
@@ -1131,7 +1251,7 @@
             hintEl.textContent = `格式：邮箱----IMAP授权码/应用密码，每行一个。当前类型：${getProviderLabel(provider)}。`;
             inputEl.placeholder = '邮箱----IMAP授权码/应用密码';
             if (exampleEl) {
-                exampleEl.textContent = '示例：\\nuser@gmail.com----app-password\\nuser2@qq.com----imap-auth-code';
+                exampleEl.textContent = '示例：\nuser@gmail.com----app-password\nuser2@qq.com----imap-auth-code';
             }
         }
 
@@ -1245,7 +1365,7 @@
 
         // 删除分组
         async function deleteGroup(groupId) {
-            if (!confirm('确定要删除该分组吗？分组下的邮箱将移至默认分组。')) {
+            if (!(await showConfirmModal('确定要删除该分组吗？分组下的邮箱将移至默认分组。', { title: '删除分组', confirmText: '确认删除' }))) {
                 return;
             }
 

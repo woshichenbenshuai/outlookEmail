@@ -1,11 +1,49 @@
-        /* global accountsCache, closeAllModals, currentGroupId, currentGroupName, deleteCurrentAccount, ensureForwardingSettingsUI, getSelectedForwardChannels, groups, handleApiError, hideEditAccountModal, hideModal, hideSettingsModal, isTempEmailGroup, isTempImportGroup, loadAccountsByGroup, loadGroups, loadTempEmails, normalizeSmtpForwardProvider, setModalVisible, setSelectedForwardChannels, showModal, showToast, syncSmtpProviderUI, toggleRefreshStrategy, updateEditAccountFields, updateImportHint */
+        /* global accountsCache, closeAllModals, currentGroupId, currentGroupName, deleteCurrentAccount, ensureForwardingSettingsUI, getSelectedForwardChannels, groups, handleApiError, hideEditAccountModal, hideModal, hideSettingsModal, isTempEmailGroup, isTempImportGroup, loadAccountsByGroup, loadGroups, loadTempEmails, normalizeSmtpForwardProvider, refreshVisibleAccountList, setAppTimeZone, setModalVisible, setSelectedForwardChannels, setShowAccountCreatedAt, showModal, showToast, syncSmtpProviderUI, toggleRefreshStrategy, updateEditAccountFields, updateImportHint */
 
         // ==================== 设置相关 ====================
+        let settingsScrollSyncBound = false;
+        let settingsScrollSyncFrame = 0;
+
+        function getSettingsScrollContainer() {
+            return document.querySelector('#settingsModal .settings-modal-body')
+                || document.querySelector('#settingsModal .settings-modal-content');
+        }
+
+        function populateTimeZoneOptions(selectedTimeZone = getAppTimeZone()) {
+            const select = document.getElementById('settingsAppTimezone');
+            if (!select) {
+                return;
+            }
+
+            const browserTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+            const normalizedTimeZone = isValidAppTimeZone(selectedTimeZone)
+                ? selectedTimeZone
+                : getAppTimeZone();
+            const availableTimeZones = getAvailableAppTimeZones();
+            if (!availableTimeZones.includes(normalizedTimeZone)) {
+                availableTimeZones.unshift(normalizedTimeZone);
+            }
+
+            select.innerHTML = '';
+            availableTimeZones.forEach(timeZone => {
+                const option = document.createElement('option');
+                option.value = timeZone;
+                option.textContent = timeZone === browserTimeZone
+                    ? `${timeZone} (System)`
+                    : timeZone;
+                option.selected = timeZone === normalizedTimeZone;
+                select.appendChild(option);
+            });
+        }
 
         // 显示设置模态框
         async function showSettingsModal() {
+            ensureSettingsScrollSync();
             showModal('settingsModal');
+            scrollSettingsSection('settingsGeneralSection');
+            populateTimeZoneOptions(getAppTimeZone());
             await loadSettings();
+            scheduleSettingsSidebarSync();
         }
 
         // 隐藏设置模态框
@@ -15,6 +53,116 @@
             const passwordInput = document.getElementById('settingsPassword');
             if (passwordInput) {
                 passwordInput.value = '';
+            }
+        }
+
+        function updateSettingsSidebarActive(sectionId) {
+            document.querySelectorAll('#settingsModal .settings-sidebar-link').forEach(link => {
+                link.classList.toggle('is-active', link.dataset.target === sectionId);
+            });
+        }
+
+        function getSettingsSidebarSectionIds() {
+            return Array.from(document.querySelectorAll('#settingsModal .settings-sidebar-link'))
+                .map(link => link.dataset.target)
+                .filter(Boolean);
+        }
+
+        function syncSettingsSidebarActiveByScroll() {
+            const scrollContainer = getSettingsScrollContainer();
+            if (!scrollContainer) {
+                return;
+            }
+
+            const sectionIds = getSettingsSidebarSectionIds();
+            if (!sectionIds.length) {
+                return;
+            }
+
+            const modalContent = document.querySelector('#settingsModal .settings-modal-content');
+            const header = modalContent?.querySelector('.modal-header');
+            const headerHeight = scrollContainer === modalContent && header ? header.offsetHeight : 0;
+            const anchorTop = scrollContainer.getBoundingClientRect().top + headerHeight + 28;
+            let activeSectionId = sectionIds[0];
+            let closestAboveId = '';
+            let closestAboveOffset = Number.NEGATIVE_INFINITY;
+            let closestBelowId = '';
+            let closestBelowOffset = Number.POSITIVE_INFINITY;
+
+            sectionIds.forEach(sectionId => {
+                const section = document.getElementById(sectionId);
+                if (!section) {
+                    return;
+                }
+
+                const offset = section.getBoundingClientRect().top - anchorTop;
+                if (offset <= 0 && offset > closestAboveOffset) {
+                    closestAboveOffset = offset;
+                    closestAboveId = sectionId;
+                }
+                if (offset > 0 && offset < closestBelowOffset) {
+                    closestBelowOffset = offset;
+                    closestBelowId = sectionId;
+                }
+            });
+
+            if (closestAboveId) {
+                activeSectionId = closestAboveId;
+            } else if (closestBelowId) {
+                activeSectionId = closestBelowId;
+            }
+
+            updateSettingsSidebarActive(activeSectionId);
+        }
+
+        function scheduleSettingsSidebarSync() {
+            if (settingsScrollSyncFrame) {
+                return;
+            }
+
+            settingsScrollSyncFrame = window.requestAnimationFrame(() => {
+                settingsScrollSyncFrame = 0;
+                syncSettingsSidebarActiveByScroll();
+            });
+        }
+
+        function ensureSettingsScrollSync() {
+            if (settingsScrollSyncBound) {
+                return;
+            }
+
+            const scrollContainer = getSettingsScrollContainer();
+            if (!scrollContainer) {
+                return;
+            }
+
+            scrollContainer.addEventListener('scroll', scheduleSettingsSidebarSync, { passive: true });
+            window.addEventListener('resize', scheduleSettingsSidebarSync);
+            settingsScrollSyncBound = true;
+        }
+
+        function scrollSettingsSection(sectionId, triggerEl = null) {
+            const scrollContainer = getSettingsScrollContainer();
+            const section = document.getElementById(sectionId);
+            if (!scrollContainer || !section) {
+                return;
+            }
+
+            const modalContent = document.querySelector('#settingsModal .settings-modal-content');
+            const header = modalContent.querySelector('.modal-header');
+            const headerHeight = scrollContainer === modalContent && header ? header.offsetHeight : 0;
+            const sectionTop = section.getBoundingClientRect().top - scrollContainer.getBoundingClientRect().top + scrollContainer.scrollTop;
+            const targetTop = Math.max(sectionTop - headerHeight - 18, 0);
+
+            scrollContainer.scrollTo({
+                top: targetTop,
+                behavior: 'smooth'
+            });
+
+            if (triggerEl?.dataset?.target) {
+                updateSettingsSidebarActive(triggerEl.dataset.target);
+            } else {
+                updateSettingsSidebarActive(sectionId);
             }
         }
 
@@ -51,17 +199,39 @@
                 return;
             }
 
+            const selectedTimeZone = document.getElementById('settingsAppTimezone')?.value || getAppTimeZone();
+            if (!isValidAppTimeZone(selectedTimeZone)) {
+                resultEl.style.display = 'block';
+                resultEl.innerHTML = `
+                    <div style="color: #dc3545;">
+                        Invalid time zone
+                    </div>
+                `;
+                return;
+            }
+
             try {
                 const response = await fetch('/api/settings/validate-cron', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ cron_expression: cronExpr })
+                    body: JSON.stringify({
+                        cron_expression: cronExpr,
+                        time_zone: selectedTimeZone
+                    })
                 });
 
                 const data = await response.json();
 
                 if (data.success && data.valid) {
-                    const nextRun = new Date(data.next_run).toLocaleString('zh-CN');
+                    const previewTimeZone = data.time_zone || selectedTimeZone;
+                    const nextRun = new Date(data.next_run).toLocaleString('zh-CN', {
+                        timeZone: previewTimeZone,
+                        year: 'numeric',
+                        month: '2-digit',
+                        day: '2-digit',
+                        hour: '2-digit',
+                        minute: '2-digit'
+                    });
                     resultEl.style.display = 'block';
                     resultEl.innerHTML = `
                         <div style="color: #28a745;">
@@ -200,6 +370,7 @@
                     document.getElementById('editImapHost').value = acc.imap_host || '';
                     document.getElementById('editImapPort').value = acc.imap_port || 993;
                     document.getElementById('editGroupSelect').value = acc.group_id || 1;
+                    document.getElementById('editSortOrder').value = Number(acc.sort_order || 0);
                     document.getElementById('editRemark').value = acc.remark || '';
                     document.getElementById('editAliases').value = Array.isArray(acc.aliases) ? acc.aliases.join('\n') : '';
                     document.getElementById('editStatus').value = acc.status || 'active';
@@ -224,6 +395,7 @@
             const provider = document.getElementById('editProviderSelect')?.value || 'outlook';
             const isOutlook = provider === 'outlook';
             const imapPort = parseInt(document.getElementById('editImapPort')?.value || '993', 10);
+            const sortOrder = parseInt(document.getElementById('editSortOrder')?.value || '0', 10);
 
             const data = {
                 email: document.getElementById('editEmail').value.trim(),
@@ -236,6 +408,7 @@
                 imap_port: Number.isFinite(imapPort) ? imapPort : 993,
                 imap_password: document.getElementById('editImapPassword')?.value || '',
                 group_id: newGroupId,
+                sort_order: Number.isFinite(sortOrder) ? Math.max(0, sortOrder) : 0,
                 remark: document.getElementById('editRemark').value.trim(),
                 aliases: document.getElementById('editAliases')?.value
                     .split('\n')
@@ -259,6 +432,10 @@
                     showToast('自定义 IMAP 必须填写服务器地址', 'error');
                     return;
                 }
+            }
+            if (!Number.isFinite(sortOrder) || sortOrder < 0) {
+                showToast('排序值不能小于 0', 'error');
+                return;
             }
 
             try {
@@ -295,6 +472,9 @@
                 const data = await response.json();
 
                 if (data.success) {
+                    const appTimeZone = data.settings.app_timezone || getAppTimeZone();
+                    setAppTimeZone(appTimeZone);
+                    populateTimeZoneOptions(appTimeZone);
                     document.getElementById('settingsApiKey').value = data.settings.gptmail_api_key || '';
                     document.getElementById('settingsExternalApiKey').value = data.settings.external_api_key || '';
                     const usernameInput = document.getElementById('settingsUsername');
@@ -306,13 +486,16 @@
                     document.getElementById('settingsCloudflareWorkerDomain').value = data.settings.cloudflare_worker_domain || '';
                     document.getElementById('settingsCloudflareEmailDomains').value = data.settings.cloudflare_email_domains || '';
                     document.getElementById('settingsCloudflareAdminPassword').value = data.settings.cloudflare_admin_password || '';
+                    document.getElementById('settingsAppTimezone').value = appTimeZone;
                     document.getElementById('settingsPassword').value = '';
 
                     document.getElementById('refreshIntervalDays').value = data.settings.refresh_interval_days || '30';
                     document.getElementById('refreshDelaySeconds').value = data.settings.refresh_delay_seconds || '5';
                     document.getElementById('refreshCron').value = data.settings.refresh_cron || '0 2 * * *';
                     document.getElementById('enableScheduledRefresh').checked = data.settings.enable_scheduled_refresh !== 'false';
+                    document.getElementById('settingsShowAccountCreatedAt').checked = String(data.settings.show_account_created_at) !== 'false';
                     document.getElementById('forwardCheckIntervalMinutes').value = data.settings.forward_check_interval_minutes || '5';
+                    document.getElementById('forwardAccountDelaySeconds').value = data.settings.forward_account_delay_seconds || '0';
                     document.getElementById('forwardEmailWindowMinutes').value = data.settings.forward_email_window_minutes || '0';
                     document.getElementById('forwardIncludeJunkemail').checked = String(data.settings.forward_include_junkemail) === 'true';
                     document.getElementById('settingsEmailForwardRecipient').value = data.settings.email_forward_recipient || '';
@@ -326,6 +509,8 @@
                     document.getElementById('settingsSmtpUseSsl').checked = String(data.settings.smtp_use_ssl) !== 'false';
                     document.getElementById('settingsTelegramBotToken').value = data.settings.telegram_bot_token || '';
                     document.getElementById('settingsTelegramChatId').value = data.settings.telegram_chat_id || '';
+                    document.getElementById('settingsTelegramProxyUrl').value = data.settings.telegram_proxy_url || '';
+                    document.getElementById('settingsWecomWebhookUrl').value = data.settings.wecom_webhook_url || '';
                     setSelectedForwardChannels(data.settings.forward_channels || []);
 
                     const useCron = data.settings.use_cron_schedule === 'true';
@@ -348,8 +533,10 @@
             const refreshDays = document.getElementById('refreshIntervalDays').value;
             const refreshDelay = document.getElementById('refreshDelaySeconds').value;
             const refreshCron = document.getElementById('refreshCron').value.trim();
+            const appTimeZone = document.getElementById('settingsAppTimezone').value.trim();
             const strategy = document.querySelector('input[name="refreshStrategy"]:checked').value;
             const enableScheduled = document.getElementById('enableScheduledRefresh').checked;
+            const showAccountCreatedAt = !!document.getElementById('settingsShowAccountCreatedAt')?.checked;
             const settings = {};
             const forwardChannels = getSelectedForwardChannels();
 
@@ -376,6 +563,7 @@
             const days = parseInt(refreshDays, 10);
             const delay = parseInt(refreshDelay, 10);
             const forwardMinutes = parseInt(document.getElementById('forwardCheckIntervalMinutes').value || '5', 10);
+            const forwardAccountDelaySeconds = parseInt(document.getElementById('forwardAccountDelaySeconds').value || '0', 10);
             const forwardWindowMinutes = parseInt(document.getElementById('forwardEmailWindowMinutes').value || '0', 10);
             const forwardIncludeJunkemail = !!document.getElementById('forwardIncludeJunkemail')?.checked;
             const smtpPortValue = document.getElementById('settingsSmtpPort').value.trim();
@@ -387,6 +575,8 @@
             const smtpUsername = document.getElementById('settingsSmtpUsername').value.trim();
             const telegramBotToken = document.getElementById('settingsTelegramBotToken').value.trim();
             const telegramChatId = document.getElementById('settingsTelegramChatId').value.trim();
+            const telegramProxyUrl = document.getElementById('settingsTelegramProxyUrl').value.trim();
+            const wecomWebhookUrl = document.getElementById('settingsWecomWebhookUrl').value.trim();
 
             if (Number.isNaN(days) || days < 1 || days > 90) {
                 showToast('刷新周期必须在 1-90 天之间', 'error');
@@ -396,8 +586,16 @@
                 showToast('刷新间隔必须在 0-60 秒之间', 'error');
                 return;
             }
+            if (!isValidAppTimeZone(appTimeZone)) {
+                showToast('Invalid time zone', 'error');
+                return;
+            }
             if (Number.isNaN(forwardMinutes) || forwardMinutes < 1 || forwardMinutes > 60) {
                 showToast('转发轮询间隔必须在 1-60 分钟之间', 'error');
+                return;
+            }
+            if (Number.isNaN(forwardAccountDelaySeconds) || forwardAccountDelaySeconds < 0 || forwardAccountDelaySeconds > 60) {
+                showToast('账号间拉取间隔必须在 0-60 秒之间', 'error');
                 return;
             }
             if (Number.isNaN(forwardWindowMinutes) || forwardWindowMinutes < 0 || forwardWindowMinutes > 10080) {
@@ -428,13 +626,20 @@
                 showToast('启用 TG 转发时必须填写 Telegram Chat ID', 'error');
                 return;
             }
+            if (forwardChannels.includes('wecom') && !wecomWebhookUrl) {
+                showToast('启用企业微信转发时必须填写 Webhook 地址', 'error');
+                return;
+            }
 
             settings.refresh_interval_days = days;
             settings.refresh_delay_seconds = delay;
             settings.use_cron_schedule = strategy === 'cron';
             settings.enable_scheduled_refresh = enableScheduled;
+            settings.app_timezone = appTimeZone;
+            settings.show_account_created_at = showAccountCreatedAt;
             settings.forward_channels = forwardChannels;
             settings.forward_check_interval_minutes = forwardMinutes;
+            settings.forward_account_delay_seconds = forwardAccountDelaySeconds;
             settings.forward_email_window_minutes = forwardWindowMinutes;
             settings.forward_include_junkemail = forwardIncludeJunkemail;
             settings.email_forward_recipient = smtpRecipient;
@@ -448,6 +653,8 @@
             settings.smtp_use_ssl = document.getElementById('settingsSmtpUseSsl').checked;
             settings.telegram_bot_token = telegramBotToken;
             settings.telegram_chat_id = telegramChatId;
+            settings.telegram_proxy_url = telegramProxyUrl;
+            settings.wecom_webhook_url = wecomWebhookUrl;
 
             if (strategy === 'cron') {
                 if (!refreshCron) {
@@ -466,7 +673,11 @@
 
                 const data = await response.json();
                 if (data.success) {
-                    showToast('设置已保存，重启应用后生效', 'success');
+                    setAppTimeZone(appTimeZone);
+                    setShowAccountCreatedAt(showAccountCreatedAt);
+                    await loadGroups();
+                    await refreshVisibleAccountList(false);
+                    showToast('时间展示已生效，定时任务重启后生效', 'success');
                     hideSettingsModal();
                 } else {
                     handleApiError(data, '保存设置失败');
@@ -494,12 +705,20 @@
                 telegram: {
                     bot_token: document.getElementById('settingsTelegramBotToken').value.trim(),
                     chat_id: document.getElementById('settingsTelegramChatId').value.trim(),
+                    proxy_url: document.getElementById('settingsTelegramProxyUrl').value.trim(),
+                },
+                wecom: {
+                    webhook_url: document.getElementById('settingsWecomWebhookUrl').value.trim(),
                 }
             };
         }
 
         async function testForwardChannel(channel) {
-            const btn = document.getElementById(channel === 'smtp' ? 'testSmtpBtn' : 'testTelegramBtn');
+            const btn = document.getElementById(
+                channel === 'smtp'
+                    ? 'testSmtpBtn'
+                    : (channel === 'telegram' ? 'testTelegramBtn' : 'testWecomBtn')
+            );
             if (!btn || btn.disabled) return;
 
             const draft = buildForwardingDraftConfig();
@@ -527,6 +746,11 @@
                 }
                 if (!draft.telegram.chat_id) {
                     showToast('请先填写 Telegram Chat ID', 'error');
+                    return;
+                }
+            } else if (channel === 'wecom') {
+                if (!draft.wecom.webhook_url) {
+                    showToast('请先填写企业微信 Webhook 地址', 'error');
                     return;
                 }
             } else {

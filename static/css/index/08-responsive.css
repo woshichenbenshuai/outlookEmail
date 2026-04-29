@@ -43,8 +43,23 @@
             }
 
             .navbar-center,
-            .github-star-btn {
+            .github-star-btn,
+            .app-version-chip__label {
                 display: none;
+            }
+
+            .navbar-brand-meta {
+                gap: 8px;
+            }
+
+            .app-version-popover {
+                left: 0;
+                width: min(240px, calc(100vw - 24px));
+            }
+
+            .app-version-chip {
+                min-height: 30px;
+                padding: 0 10px;
             }
 
             .mobile-nav-menu-btn {
@@ -500,6 +515,12 @@
                 flex-shrink: 0;
             }
 
+            .email-detail-meta-value {
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+
             .email-detail-meta-collapsible {
                 display: block;
                 border-top: 1px solid #eef2f7;
@@ -546,6 +567,29 @@
 
             .email-detail-body {
                 padding: 14px 14px 20px;
+            }
+
+            .email-attachments {
+                margin-bottom: 14px;
+                padding: 12px;
+                border-radius: 14px;
+            }
+
+            .email-attachments__header {
+                align-items: flex-start;
+                flex-direction: column;
+                gap: 4px;
+            }
+
+            .email-attachment-item {
+                padding: 10px 12px;
+                border-radius: 12px;
+            }
+
+            .email-attachment-item__icon {
+                width: 32px;
+                height: 32px;
+                border-radius: 10px;
             }
 
             .group-list,
@@ -673,6 +717,19 @@
             .email-top-row {
                 flex-direction: column;
                 align-items: flex-start;
+            }
+
+            .email-top-main {
+                width: 100%;
+            }
+
+            .email-sender-block {
+                flex: 1 1 100%;
+            }
+
+            .email-folder-badge {
+                max-width: 100%;
+                align-self: flex-start;
             }
 
             .email-date {

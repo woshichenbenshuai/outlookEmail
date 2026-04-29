@@ -1,4 +1,4 @@
-        /* global closeAllModals, debounce, ensureForwardingSettingsUI, handleGlobalGroupPointerMove, handleGlobalGroupPointerUp, initColorPicker, initEmailListScroll, loadGroups, loadTags, searchAccounts */
+        /* global closeAllModals, debounce, ensureForwardingSettingsUI, handleGlobalGroupPointerMove, handleGlobalGroupPointerUp, initColorPicker, initEmailListScroll, loadGroups, loadTags, renderEmailList, scheduleEmailListLoadCheck, searchAccounts */
 
         // 全局状态
         let csrfToken = null;
@@ -6,7 +6,7 @@
         let currentGroupId = null;
         let currentEmails = [];
         let currentMethod = 'graph';
-        let currentFolder = 'inbox'; // 当前文件夹：inbox 或 deleteditems
+        let currentFolder = 'all'; // 当前文件夹：all / inbox / junkemail / deleteditems
         let isListVisible = true;
         let groups = [];
         let accountsCache = {}; // 缓存各分组的邮箱列表
@@ -27,12 +27,486 @@
         let currentEmailDetail = null; // 当前查看的邮件详细数据
         let isTrustedMode = false; // 是否处于信任模式（不过滤 HTML）
         let oauthPreviewAccount = null;
+        const UNTAGGED_TAG_FILTER_KEY = '__untagged__';
         let selectedTagFilters = new Set();
         let tagFilterKeyword = '';
         let responsiveUiResizeTimer = null;
+        const EMAIL_LIST_REQUEST_TIMEOUT_MS = 70000;
+        const EMAIL_DETAIL_REQUEST_TIMEOUT_MS = 45000;
+        const EMAIL_LIST_LOAD_MORE_THRESHOLD_PX = 96;
+        const TOKEN_REFRESH_REQUEST_TIMEOUT_MS = 70000;
+        const BULK_REFRESH_BASE_TIMEOUT_MS = 30000;
+        const BULK_REFRESH_PER_ACCOUNT_TIMEOUT_MS = 35000;
+        const BULK_REFRESH_MAX_TIMEOUT_MS = 180000;
+        const REFRESH_STREAM_STALL_TIMEOUT_MS = 70000;
+        const VERSION_STATUS_REQUEST_TIMEOUT_MS = 12000;
+        const DEFAULT_APP_TIME_ZONE = 'Asia/Shanghai';
+        const FALLBACK_APP_TIME_ZONES = [
+            'Asia/Shanghai',
+            'UTC',
+            'Asia/Tokyo',
+            'Asia/Singapore',
+            'Europe/London',
+            'America/Los_Angeles',
+            'America/New_York',
+        ];
+        let versionStatusRequest = null;
+        let emailListLoadCheckTimer = null;
+        let appTimeZone = DEFAULT_APP_TIME_ZONE;
+        let showAccountCreatedAt = true;
+
+        function isUntaggedTagFilterValue(value) {
+            return String(value || '').trim() === UNTAGGED_TAG_FILTER_KEY;
+        }
+
+        function normalizeTagFilterSelectionValue(value) {
+            if (isUntaggedTagFilterValue(value)) {
+                return UNTAGGED_TAG_FILTER_KEY;
+            }
+            const normalized = Number.parseInt(String(value ?? '').trim(), 10);
+            return Number.isFinite(normalized) ? normalized : null;
+        }
+
+        function matchesSelectedTagFilters(tags) {
+            if (!selectedTagFilters.size) {
+                return true;
+            }
+
+            const safeTags = Array.isArray(tags) ? tags : [];
+            const includeUntagged = selectedTagFilters.has(UNTAGGED_TAG_FILTER_KEY);
+            const selectedRealTagIds = Array.from(selectedTagFilters).filter(value => !isUntaggedTagFilterValue(value));
+
+            const matchesRealTag = selectedRealTagIds.length > 0
+                && safeTags.some(tag => selectedRealTagIds.includes(normalizeTagFilterSelectionValue(tag?.id)));
+            const matchesUntagged = includeUntagged && safeTags.length === 0;
+
+            return matchesRealTag || matchesUntagged;
+        }
 
         function isMobileLayout() {
             return window.matchMedia('(max-width: 768px)').matches;
+        }
+
+        function isValidAppTimeZone(timeZone) {
+            const candidate = String(timeZone || '').trim();
+            if (!candidate) {
+                return false;
+            }
+
+            try {
+                Intl.DateTimeFormat('zh-CN', { timeZone: candidate }).format(new Date());
+                return true;
+            } catch (error) {
+                return false;
+            }
+        }
+
+        function normalizeAppTimeZone(timeZone) {
+            const candidate = String(timeZone || '').trim();
+            if (isValidAppTimeZone(candidate)) {
+                return candidate;
+            }
+            if (isValidAppTimeZone(DEFAULT_APP_TIME_ZONE)) {
+                return DEFAULT_APP_TIME_ZONE;
+            }
+            return 'UTC';
+        }
+
+        function setAppTimeZone(timeZone) {
+            appTimeZone = normalizeAppTimeZone(timeZone);
+            return appTimeZone;
+        }
+
+        function getAppTimeZone() {
+            return normalizeAppTimeZone(appTimeZone);
+        }
+
+        function setShowAccountCreatedAt(enabled) {
+            showAccountCreatedAt = enabled !== false;
+            return showAccountCreatedAt;
+        }
+
+        function shouldShowAccountCreatedAt() {
+            return showAccountCreatedAt !== false;
+        }
+
+        function parseDateInput(dateInput) {
+            if (!dateInput) {
+                return null;
+            }
+
+            if (dateInput instanceof Date) {
+                return Number.isNaN(dateInput.getTime()) ? null : dateInput;
+            }
+
+            if (typeof dateInput === 'number' || /^\d+$/.test(String(dateInput))) {
+                const timestamp = Number(dateInput);
+                const parsed = new Date(timestamp < 1000000000000 ? timestamp * 1000 : timestamp);
+                return Number.isNaN(parsed.getTime()) ? null : parsed;
+            }
+
+            let normalizedInput = String(dateInput).trim();
+            if (!normalizedInput) {
+                return null;
+            }
+
+            if (!normalizedInput.includes('Z') && !normalizedInput.includes('+') && !normalizedInput.includes('-', 10)) {
+                normalizedInput += 'Z';
+            }
+
+            const parsed = new Date(normalizedInput);
+            return Number.isNaN(parsed.getTime()) ? null : parsed;
+        }
+
+        function formatAbsoluteDateTime(dateInput) {
+            const date = parseDateInput(dateInput);
+            if (!date) {
+                return '-';
+            }
+
+            return date.toLocaleString('zh-CN', {
+                timeZone: getAppTimeZone(),
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+            });
+        }
+
+        function getAvailableAppTimeZones() {
+            const browserTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+            const supportedTimeZones = typeof Intl.supportedValuesOf === 'function'
+                ? Intl.supportedValuesOf('timeZone')
+                : [];
+            const merged = [...FALLBACK_APP_TIME_ZONES, browserTimeZone, ...supportedTimeZones];
+            const unique = [];
+            const seen = new Set();
+
+            merged.forEach(timeZone => {
+                const candidate = String(timeZone || '').trim();
+                if (!candidate || seen.has(candidate) || !isValidAppTimeZone(candidate)) {
+                    return;
+                }
+                seen.add(candidate);
+                unique.push(candidate);
+            });
+
+            return unique;
+        }
+
+        function isTimeoutAbortError(error) {
+            return error?.name === 'AbortError';
+        }
+
+        function getNextEmailSkipFromCache(cache) {
+            const cachedEmailCount = Array.isArray(cache?.emails) ? cache.emails.length : 0;
+            const cachedSkip = Number(cache?.skip);
+
+            if (!Number.isFinite(cachedSkip) || cachedSkip < 0) {
+                return cachedEmailCount;
+            }
+
+            return Math.max(cachedSkip, cachedEmailCount);
+        }
+
+        function normalizeFolderSummaries(rawSummaries) {
+            const normalizedSummaries = {};
+            Object.entries(rawSummaries || {}).forEach(([folder, summary]) => {
+                const normalizedFolder = String(folder || '').trim().toLowerCase();
+                if (!normalizedFolder || !summary || typeof summary !== 'object') {
+                    return;
+                }
+
+                const fetchedCount = Number(summary.fetched_count);
+                const requestMethod = String(summary.request_method || '').trim().toLowerCase();
+                const methodLabel = String(summary.method || '').trim();
+                normalizedSummaries[normalizedFolder] = {
+                    success: summary.success === true,
+                    fetched_count: Number.isFinite(fetchedCount) && fetchedCount >= 0 ? fetchedCount : 0,
+                    has_more: summary.has_more === true,
+                    request_method: requestMethod === 'graph' || requestMethod === 'imap' ? requestMethod : '',
+                    method: methodLabel,
+                };
+                if (Object.prototype.hasOwnProperty.call(summary, 'error')) {
+                    normalizedSummaries[normalizedFolder].error = summary.error;
+                }
+            });
+            return normalizedSummaries;
+        }
+
+        function mergeFolderSummaries(currentSummaries, incomingSummaries, { appendFetchedCount = false } = {}) {
+            const mergedSummaries = normalizeFolderSummaries(currentSummaries);
+            const normalizedIncoming = normalizeFolderSummaries(incomingSummaries);
+
+            Object.entries(normalizedIncoming).forEach(([folder, summary]) => {
+                const existingSummary = mergedSummaries[folder];
+                if (!existingSummary) {
+                    mergedSummaries[folder] = summary;
+                    return;
+                }
+
+                if (appendFetchedCount && existingSummary.success === true && summary.success === true) {
+                    mergedSummaries[folder] = {
+                        ...existingSummary,
+                        ...summary,
+                        fetched_count: existingSummary.fetched_count + summary.fetched_count,
+                    };
+                    return;
+                }
+
+                if (summary.success === false) {
+                    mergedSummaries[folder] = {
+                        ...existingSummary,
+                        ...summary,
+                        fetched_count: existingSummary.fetched_count,
+                    };
+                    return;
+                }
+
+                mergedSummaries[folder] = {
+                    ...existingSummary,
+                    ...summary,
+                };
+            });
+
+            return mergedSummaries;
+        }
+
+        function buildDerivedEmailListCache(account, folder) {
+            const normalizedAccount = String(account || '').trim();
+            const normalizedFolder = String(folder || '').trim().toLowerCase();
+
+            if (!normalizedAccount || !['inbox', 'junkemail'].includes(normalizedFolder)) {
+                return null;
+            }
+
+            const allCache = emailListCache[`${normalizedAccount}_all`];
+            if (!allCache || !Array.isArray(allCache.emails)) {
+                return null;
+            }
+
+            const folderSummaries = normalizeFolderSummaries(allCache.folder_summaries);
+            const folderSummary = folderSummaries[normalizedFolder];
+            if (!folderSummary || folderSummary.success !== true) {
+                return null;
+            }
+
+            const filteredEmails = allCache.emails.filter(email => String(email?.folder || '').trim().toLowerCase() === normalizedFolder);
+            const fetchedCount = Number(folderSummary.fetched_count);
+            return {
+                emails: filteredEmails,
+                has_more: folderSummary.has_more === true,
+                skip: Number.isFinite(fetchedCount) && fetchedCount >= 0
+                    ? Math.max(fetchedCount, filteredEmails.length)
+                    : filteredEmails.length,
+                method: folderSummary.request_method || allCache.method || 'graph',
+                method_label: folderSummary.method || allCache.method_label || allCache.method || 'graph',
+                derived_from: 'all',
+                folder_summaries: {
+                    [normalizedFolder]: folderSummary,
+                }
+            };
+        }
+
+        function getEmailListCacheEntry(account, folder = 'all') {
+            const normalizedAccount = String(account || '').trim();
+            const normalizedFolder = String(folder || 'all').trim().toLowerCase() || 'all';
+
+            if (!normalizedAccount) {
+                return null;
+            }
+
+            const cacheKey = `${normalizedAccount}_${normalizedFolder}`;
+            const directCache = emailListCache[cacheKey];
+            if (directCache && directCache.derived_from !== 'all') {
+                return directCache;
+            }
+
+            const derivedCache = buildDerivedEmailListCache(normalizedAccount, normalizedFolder);
+            if (derivedCache) {
+                emailListCache[cacheKey] = derivedCache;
+                return derivedCache;
+            }
+
+            if (directCache) {
+                delete emailListCache[cacheKey];
+            }
+
+            return null;
+        }
+
+        function applyEmailListCache(cache, { scheduleLoadCheck = true } = {}) {
+            currentEmails = Array.isArray(cache?.emails) ? cache.emails : [];
+            hasMoreEmails = cache?.has_more === true;
+            currentSkip = getNextEmailSkipFromCache(cache);
+            currentMethod = cache?.method || 'graph';
+
+            const methodTag = document.getElementById('methodTag');
+            if (methodTag) {
+                methodTag.textContent = cache?.method_label || currentMethod;
+                methodTag.style.display = 'inline';
+            }
+
+            const emailCount = document.getElementById('emailCount');
+            if (emailCount) {
+                emailCount.textContent = `(${currentEmails.length})`;
+            }
+
+            renderEmailList(currentEmails);
+            if (scheduleLoadCheck) {
+                scheduleEmailListLoadCheck(0);
+            }
+        }
+
+        function invalidateEmailListCache(account, folder = 'all') {
+            const normalizedAccount = String(account || '').trim();
+            const normalizedFolder = String(folder || 'all').trim().toLowerCase() || 'all';
+
+            if (!normalizedAccount) {
+                return;
+            }
+
+            const cacheKeys = new Set([`${normalizedAccount}_${normalizedFolder}`]);
+            if (normalizedFolder === 'all') {
+                cacheKeys.add(`${normalizedAccount}_inbox`);
+                cacheKeys.add(`${normalizedAccount}_junkemail`);
+            } else if (['inbox', 'junkemail'].includes(normalizedFolder)) {
+                cacheKeys.add(`${normalizedAccount}_all`);
+            }
+
+            cacheKeys.forEach(cacheKey => {
+                delete emailListCache[cacheKey];
+            });
+        }
+
+        function canLoadMoreEmails() {
+            if (isLoadingMore || !hasMoreEmails || !currentAccount || isTempEmailGroup) {
+                return false;
+            }
+
+            const listPanel = document.getElementById('emailListPanel');
+            return !listPanel || !listPanel.classList.contains('hidden');
+        }
+
+        function isEmailListNearBottom(emailList) {
+            if (!emailList) {
+                return false;
+            }
+
+            const remainingScroll = emailList.scrollHeight - emailList.scrollTop - emailList.clientHeight;
+            return remainingScroll <= EMAIL_LIST_LOAD_MORE_THRESHOLD_PX;
+        }
+
+        function maybeLoadMoreEmails() {
+            if (!canLoadMoreEmails()) {
+                return;
+            }
+
+            const emailList = document.getElementById('emailList');
+            if (isEmailListNearBottom(emailList)) {
+                loadMoreEmails();
+            }
+        }
+
+        function scheduleEmailListLoadCheck(delayMs = 0) {
+            if (emailListLoadCheckTimer) {
+                window.clearTimeout(emailListLoadCheckTimer);
+                emailListLoadCheckTimer = null;
+            }
+
+            const runCheck = () => {
+                emailListLoadCheckTimer = null;
+                window.requestAnimationFrame(() => {
+                    maybeLoadMoreEmails();
+                });
+            };
+
+            if (delayMs > 0) {
+                emailListLoadCheckTimer = window.setTimeout(runCheck, delayMs);
+                return;
+            }
+
+            runCheck();
+        }
+
+        function fetchWithTimeout(url, options = {}) {
+            const fetchOptions = { ...(options || {}) };
+            const timeoutMs = Number(fetchOptions.timeoutMs || 0);
+            const timeoutMessage = fetchOptions.timeoutMessage || '请求超时，请稍后重试';
+            delete fetchOptions.timeoutMs;
+            delete fetchOptions.timeoutMessage;
+
+            if (!timeoutMs || timeoutMs <= 0) {
+                return window.fetch(url, fetchOptions);
+            }
+
+            const controller = new AbortController();
+            const originalSignal = fetchOptions.signal;
+            const timer = window.setTimeout(() => {
+                controller.abort(new DOMException(timeoutMessage, 'AbortError'));
+            }, timeoutMs);
+
+            if (originalSignal) {
+                if (originalSignal.aborted) {
+                    controller.abort(originalSignal.reason);
+                } else {
+                    originalSignal.addEventListener('abort', () => controller.abort(originalSignal.reason), { once: true });
+                }
+            }
+
+            fetchOptions.signal = controller.signal;
+            return window.fetch(url, fetchOptions).finally(() => {
+                window.clearTimeout(timer);
+            });
+        }
+
+        function createEventSourceWatchdog(eventSource, timeoutMs, onTimeout) {
+            let timer = null;
+
+            function stop() {
+                if (timer) {
+                    window.clearTimeout(timer);
+                    timer = null;
+                }
+            }
+
+            function reset() {
+                stop();
+                timer = window.setTimeout(() => {
+                    try {
+                        eventSource.close();
+                    } catch (error) {
+                        console.warn('关闭超时 EventSource 失败:', error);
+                    }
+                    if (typeof onTimeout === 'function') {
+                        onTimeout();
+                    }
+                }, timeoutMs);
+            }
+
+            reset();
+            return { reset, stop };
+        }
+
+        function getFolderDisplayName(folder) {
+            const names = {
+                all: '全部邮件',
+                inbox: '收件箱',
+                junkemail: '垃圾邮件',
+                deleteditems: '已删除邮件'
+            };
+            return names[String(folder || '').trim().toLowerCase()] || '邮件';
+        }
+
+        function normalizeGroupName(groupName, fallbackName = '未命名分组') {
+            const normalizedName = String(groupName || '').trim();
+            return normalizedName || fallbackName;
+        }
+
+        function formatGroupIdBadgeText(groupId) {
+            const normalizedId = Number.parseInt(String(groupId ?? ''), 10);
+            return Number.isFinite(normalizedId) ? String(normalizedId) : '';
         }
 
         function updateMobileQuickbarState() {
@@ -57,7 +531,9 @@
             const mobileActive = isMobileLayout();
 
             if (groupText) {
-                groupText.textContent = currentGroup ? currentGroup.name : '未选择';
+                groupText.textContent = currentGroup
+                    ? normalizeGroupName(currentGroup.name)
+                    : '未选择';
             }
 
             if (accountText) {
@@ -126,6 +602,118 @@
             document.getElementById('mobileNavMenuBtn')?.setAttribute('aria-expanded', 'false');
         }
 
+        function closeVersionPopover() {
+            const versionRoot = document.getElementById('appVersion');
+            const versionPopover = document.getElementById('appVersionPopover');
+            if (!versionRoot || !versionPopover) return;
+
+            versionRoot.classList.remove('is-open');
+            document.getElementById('appVersionChip')?.setAttribute('aria-expanded', 'false');
+            versionPopover.setAttribute('aria-hidden', 'true');
+            versionPopover.hidden = true;
+        }
+
+        function toggleVersionPopover() {
+            const versionRoot = document.getElementById('appVersion');
+            const versionPopover = document.getElementById('appVersionPopover');
+            if (!versionRoot || !versionPopover) return false;
+
+            const willOpen = !versionRoot.classList.contains('is-open');
+            closeNavbarActionsMenu();
+            versionRoot.classList.toggle('is-open', willOpen);
+            document.getElementById('appVersionChip')?.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+            versionPopover.setAttribute('aria-hidden', willOpen ? 'false' : 'true');
+            versionPopover.hidden = !willOpen;
+            return false;
+        }
+
+        function copyAppVersion() {
+            const versionText = document.getElementById('appVersionValue')?.textContent?.trim();
+            if (!versionText) return;
+
+            if (typeof copyTextToClipboard === 'function') {
+                Promise.resolve(copyTextToClipboard(versionText, '版本号已复制')).finally(closeVersionPopover);
+                return;
+            }
+
+            if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+                navigator.clipboard.writeText(versionText).then(() => {
+                    showToast('版本号已复制', 'success');
+                    closeVersionPopover();
+                }).catch(() => {
+                    showToast('复制失败，请手动复制', 'error');
+                });
+            }
+        }
+
+        function applyVersionStatus(versionStatus = {}) {
+            const statusBadge = document.getElementById('appVersionStatus');
+            const hintEl = document.getElementById('appVersionHint');
+            const actionLink = document.getElementById('appVersionActionLink');
+            const state = String(versionStatus.status || 'unknown').trim() || 'unknown';
+            const badgeLabel = String(versionStatus.badge_label || '检查失败').trim() || '检查失败';
+            const hint = String(versionStatus.hint || '暂时无法获取仓库版本信息').trim() || '暂时无法获取仓库版本信息';
+            const updateUrl = String(versionStatus.update_url || '').trim();
+            const defaultLabel = actionLink?.dataset.defaultLabel || '查看更新日志';
+
+            if (statusBadge) {
+                statusBadge.dataset.state = state;
+                statusBadge.textContent = badgeLabel;
+            }
+
+            if (hintEl) {
+                hintEl.textContent = hint;
+            }
+
+            if (actionLink) {
+                actionLink.href = updateUrl || actionLink.href;
+                actionLink.textContent = state === 'update_available' ? '前往更新' : defaultLabel;
+            }
+        }
+
+        async function loadVersionStatus(forceRefresh = false) {
+            if (versionStatusRequest && !forceRefresh) {
+                return versionStatusRequest;
+            }
+
+            applyVersionStatus({
+                status: 'checking',
+                badge_label: '检查中',
+                hint: '正在检查仓库版本...',
+            });
+
+            const requestUrl = forceRefresh ? '/api/version-status?refresh=1' : '/api/version-status';
+            versionStatusRequest = fetchWithTimeout(requestUrl, {
+                timeoutMs: VERSION_STATUS_REQUEST_TIMEOUT_MS,
+                timeoutMessage: '检查更新超时',
+            })
+                .then(async (response) => {
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok || !payload.success || !payload.version_status) {
+                        throw new Error(payload.error || '版本状态获取失败');
+                    }
+                    applyVersionStatus(payload.version_status);
+                    return payload.version_status;
+                })
+                .catch(() => {
+                    const fallbackStatus = {
+                        status: 'unknown',
+                        badge_label: '检查失败',
+                        hint: '暂时无法获取仓库版本信息',
+                    };
+                    applyVersionStatus(fallbackStatus);
+                    return fallbackStatus;
+                })
+                .finally(() => {
+                    versionStatusRequest = null;
+                });
+
+            return versionStatusRequest;
+        }
+
+        window.toggleVersionPopover = toggleVersionPopover;
+        window.copyAppVersion = copyAppVersion;
+
         function toggleNavbarActionsMenu() {
             if (!isMobileLayout()) return;
 
@@ -134,6 +722,7 @@
 
             const willOpen = !container.classList.contains('is-open');
             closeMobilePanels();
+            closeVersionPopover();
             container.classList.toggle('is-open', willOpen);
             document.getElementById('mobileNavMenuBtn')?.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
         }
@@ -141,6 +730,9 @@
         function handleGlobalChromeClick(event) {
             if (!event.target.closest('.navbar-actions')) {
                 closeNavbarActionsMenu();
+            }
+            if (!event.target.closest('.app-version')) {
+                closeVersionPopover();
             }
         }
 
@@ -178,45 +770,149 @@
             }
 
             updateMobileContext();
+            scheduleEmailListLoadCheck(0);
         }
 
         // ==================== CSRF 防护 ====================
 
+        const originalFetch = window.fetch.bind(window);
+
         // 初始化 CSRF Token
-        async function initCSRFToken() {
+        async function initCSRFToken(forceRefresh = false) {
+            if (csrfToken && !forceRefresh) {
+                return csrfToken;
+            }
+
             try {
-                const response = await fetch('/api/csrf-token');
+                const response = await originalFetch('/api/csrf-token', {
+                    cache: 'no-store',
+                    credentials: 'same-origin',
+                    headers: {
+                        'Cache-Control': 'no-cache'
+                    }
+                });
+                if (!response.ok) {
+                    throw new Error(`CSRF token request failed: ${response.status}`);
+                }
                 const data = await response.json();
-                csrfToken = data.csrf_token;
+                csrfToken = data.csrf_token || null;
                 if (data.csrf_disabled) {
                     console.warn('CSRF protection is disabled. Install flask-wtf for better security.');
                 }
+                return csrfToken;
             } catch (error) {
                 console.error('Failed to initialize CSRF token:', error);
+                return null;
             }
         }
 
-        // 包装 fetch 请求，自动添加 CSRF Token
-        const originalFetch = window.fetch;
-        window.fetch = function (url, options = {}) {
-            // 只对非 GET 请求添加 CSRF Token
-            if (options.method && options.method.toUpperCase() !== 'GET' && csrfToken) {
-                if (options.headers instanceof Headers) {
-                    options.headers.set('X-CSRFToken', csrfToken);
-                } else {
-                    options.headers = {
-                        ...(options.headers || {}),
-                        'X-CSRFToken': csrfToken
+        function appendCSRFHeader(options, token) {
+            if (!token) {
+                return;
+            }
+
+            if (options.headers instanceof Headers) {
+                options.headers.set('X-CSRFToken', token);
+                return;
+            }
+
+            options.headers = {
+                ...(options.headers || {}),
+                'X-CSRFToken': token
+            };
+        }
+
+        async function isCSRFFailureResponse(response) {
+            if (!response || response.status !== 400) {
+                return false;
+            }
+
+            try {
+                const contentType = response.headers.get('content-type') || '';
+                if (contentType.includes('application/json')) {
+                    const payload = await response.clone().json();
+                    const errorMessage = String(
+                        payload?.error || payload?.message || payload?.description || ''
+                    );
+                    return Boolean(payload?.csrf_error) || /csrf/i.test(errorMessage);
+                }
+
+                const bodyText = await response.clone().text();
+                return /csrf/i.test(bodyText);
+            } catch (error) {
+                console.warn('Failed to inspect CSRF error response:', error);
+                return false;
+            }
+        }
+
+        async function fetchWithCSRF(url, options = {}, retrying = false) {
+            const requestOptions = {
+                credentials: 'same-origin',
+                ...(options || {})
+            };
+            const method = String(requestOptions.method || 'GET').toUpperCase();
+
+            if (method !== 'GET') {
+                if (!csrfToken) {
+                    await initCSRFToken();
+                }
+                appendCSRFHeader(requestOptions, csrfToken);
+            }
+
+            const response = await originalFetch(url, requestOptions);
+            if (retrying || method === 'GET') {
+                return response;
+            }
+
+            if (await isCSRFFailureResponse(response)) {
+                csrfToken = null;
+                const refreshedToken = await initCSRFToken(true);
+                if (refreshedToken) {
+                    const retryOptions = {
+                        credentials: 'same-origin',
+                        ...(options || {})
                     };
+                    appendCSRFHeader(retryOptions, refreshedToken);
+                    return fetchWithCSRF(url, retryOptions, true);
                 }
             }
-            return originalFetch(url, options);
+
+            return response;
+        }
+
+        // 包装 fetch 请求，自动添加 CSRF Token
+        window.fetch = function (url, options = {}) {
+            return fetchWithCSRF(url, options);
         };
+
+        async function loadAppTimeZoneFromSettings() {
+            try {
+                const response = await fetch('/api/settings', {
+                    method: 'GET',
+                    cache: 'no-store',
+                    credentials: 'same-origin'
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || !data?.success) {
+                    return null;
+                }
+
+                const timeZone = data?.settings?.app_timezone;
+                if (timeZone) {
+                    setAppTimeZone(timeZone);
+                }
+                setShowAccountCreatedAt(String(data?.settings?.show_account_created_at) !== 'false');
+                return data?.settings || null;
+            } catch (error) {
+                return null;
+            }
+        }
 
         // 初始化
         document.addEventListener('DOMContentLoaded', async function () {
             // 初始化 CSRF Token
             await initCSRFToken();
+            await loadAppTimeZoneFromSettings();
             ensureForwardingSettingsUI();
             bindPersistentButtonHandlers();
             document.addEventListener('click', closeAccountActionMenus);
@@ -251,8 +947,14 @@
                 clearTimeout(responsiveUiResizeTimer);
                 responsiveUiResizeTimer = window.setTimeout(syncResponsiveUI, 120);
             });
+            document.addEventListener('keydown', function (event) {
+                if (event.key === 'Escape') {
+                    closeVersionPopover();
+                }
+            });
 
             closeAllModals(); // 修复：应用启动时关闭所有模态框，防止浏览器缓存导致残留的模态框背景层
+            loadVersionStatus();
             loadGroups();
             if (typeof loadTags === 'function') {
                 loadTags();
@@ -360,14 +1062,9 @@
         // 初始化邮件列表滚动监听
         function initEmailListScroll() {
             const emailList = document.getElementById('emailList');
-            emailList.addEventListener('scroll', function () {
-                // 检查是否滚动到底部
-                if (emailList.scrollHeight - emailList.scrollTop <= emailList.clientHeight + 50) {
-                    if (!isLoadingMore && hasMoreEmails && currentAccount && !isTempEmailGroup) {
-                        loadMoreEmails();
-                    }
-                }
-            });
+            if (!emailList) return;
+
+            emailList.addEventListener('scroll', maybeLoadMoreEmails, { passive: true });
         }
 
         // 加载更多邮件
@@ -375,7 +1072,8 @@
             if (isLoadingMore || !hasMoreEmails) return;
 
             isLoadingMore = true;
-            currentSkip += 20; // 每页20封
+            const nextSkip = Math.max(Number(currentSkip) || 0, Array.isArray(currentEmails) ? currentEmails.length : 0);
+            currentSkip = nextSkip;
 
             // 在列表底部显示加载状态
             const emailList = document.getElementById('emailList');
@@ -394,8 +1092,12 @@
             folderTabs.forEach(tab => tab.disabled = true);
 
             try {
-                const response = await fetch(
-                    `/api/emails/${encodeURIComponent(currentAccount)}?method=${currentMethod}&folder=${currentFolder}&skip=${currentSkip}&top=20`
+                const response = await fetchWithTimeout(
+                    `/api/emails/${encodeURIComponent(currentAccount)}?method=${currentMethod}&folder=${currentFolder}&skip=${nextSkip}&top=20`,
+                    {
+                        timeoutMs: EMAIL_LIST_REQUEST_TIMEOUT_MS,
+                        timeoutMessage: '加载更多邮件超时，请稍后重试'
+                    }
                 );
                 const data = await response.json();
 
@@ -403,6 +1105,7 @@
                     // 追加新邮件到列表
                     currentEmails = currentEmails.concat(data.emails);
                     hasMoreEmails = data.has_more;
+                    currentSkip = currentEmails.length;
 
                     // 移除加载状态
                     const loadingEl = document.getElementById('loadingMore');
@@ -421,10 +1124,37 @@
                             emailListCache[cacheKey].emails = currentEmails;
                             emailListCache[cacheKey].has_more = hasMoreEmails;
                             emailListCache[cacheKey].skip = currentSkip;
+                            emailListCache[cacheKey].derived_from = null;
+                            emailListCache[cacheKey].method = currentMethod;
+                            if (data.method) {
+                                emailListCache[cacheKey].method_label = data.method;
+                            }
+                            if (currentFolder === 'all' && data.folder_summaries) {
+                                emailListCache[cacheKey].folder_summaries = mergeFolderSummaries(
+                                    emailListCache[cacheKey].folder_summaries,
+                                    data.folder_summaries,
+                                    { appendFetchedCount: true }
+                                );
+                            }
+                        } else {
+                            emailListCache[cacheKey] = {
+                                emails: currentEmails,
+                                has_more: hasMoreEmails,
+                                skip: currentSkip,
+                                method: currentMethod,
+                                method_label: data.method || currentMethod,
+                                derived_from: null,
+                                folder_summaries: currentFolder === 'all'
+                                    ? normalizeFolderSummaries(data.folder_summaries)
+                                    : undefined
+                            };
                         }
                     }
+
+                    scheduleEmailListLoadCheck(80);
                 } else {
                     hasMoreEmails = false;
+                    currentSkip = Array.isArray(currentEmails) ? currentEmails.length : nextSkip;
                     // 显示"没有更多邮件"
                     const loadingEl = document.getElementById('loadingMore');
                     if (loadingEl) {
@@ -434,7 +1164,7 @@
             } catch (error) {
                 const loadingEl = document.getElementById('loadingMore');
                 if (loadingEl) loadingEl.remove();
-                showToast('加载失败', 'error');
+                showToast(isTimeoutAbortError(error) ? '加载更多邮件超时' : '加载失败', 'error');
             } finally {
                 isLoadingMore = false;
                 // 启用按钮
@@ -458,29 +1188,17 @@
                 tab.classList.toggle('active', tab.dataset.folder === folder);
             });
 
-            const cacheKey = `${currentAccount}_${folder}`;
+            const cache = getEmailListCacheEntry(currentAccount, folder);
 
             // 检查是否有缓存
-            if (emailListCache[cacheKey]) {
-                const cache = emailListCache[cacheKey];
-                currentEmails = cache.emails;
-                hasMoreEmails = cache.has_more;
-                currentSkip = cache.skip;
-                currentMethod = cache.method || 'graph';
-
-                // 恢复 UI
-                const methodTag = document.getElementById('methodTag');
-                methodTag.textContent = currentMethod;
-                methodTag.style.display = 'inline';
-                document.getElementById('emailCount').textContent = `(${currentEmails.length})`;
-
-                renderEmailList(currentEmails);
+            if (cache) {
+                applyEmailListCache(cache, { scheduleLoadCheck: false });
             } else {
                 // 清空邮件列表，显示提示
                 document.getElementById('emailList').innerHTML = `
                     <div class="empty-state">
                         <div class="empty-state-icon">📬</div>
-                        <div class="empty-state-text">正在自动刷新${folder === 'inbox' ? '收件箱' : '垃圾邮件'}...</div>
+                        <div class="empty-state-text">正在自动刷新${getFolderDisplayName(folder)}...</div>
                     </div>
                 `;
                 document.getElementById('emailCount').textContent = '';
@@ -501,8 +1219,8 @@
             document.getElementById('emailDetailToolbar').style.display = 'none';
 
             // 切换文件夹后自动刷新对应列表
-            if (currentAccount && !isTempEmailGroup) {
-                loadEmails(currentAccount, true);
+            if (currentAccount && !isTempEmailGroup && !cache) {
+                loadEmails(currentAccount);
             }
         }
 
@@ -584,6 +1302,38 @@
             return setModalVisible(modalId, false);
         }
 
+        // 通用确认模态框 - 替代原生 confirm()
+        let _genericConfirmResolve = null;
+
+        function showConfirmModal(message, { title = "确认操作", confirmText = "确认", danger = true } = {}) {
+            return new Promise((resolve) => {
+                _genericConfirmResolve = resolve;
+                document.getElementById('genericConfirmTitle').textContent = title;
+                document.getElementById('genericConfirmMsg').textContent = message;
+                const btn = document.getElementById('genericConfirmBtn');
+                btn.textContent = confirmText;
+                btn.className = danger ? 'btn btn-danger' : 'btn btn-primary';
+                closeNavbarActionsMenu();
+                closeMobilePanels();
+                setModalVisible('genericConfirmModal', true);
+            });
+        }
+
+        function resolveGenericConfirm() {
+            hideModal('genericConfirmModal');
+            if (_genericConfirmResolve) {
+                _genericConfirmResolve(true);
+                _genericConfirmResolve = null;
+            }
+        }
+
+        function hideGenericConfirmModal() {
+            hideModal('genericConfirmModal');
+            if (_genericConfirmResolve) {
+                _genericConfirmResolve(false);
+                _genericConfirmResolve = null;
+            }
+        }
         function showModal(modalId) {
             closeNavbarActionsMenu();
             closeMobilePanels();
@@ -729,7 +1479,7 @@
             const btn = document.getElementById('resetAccountForwardingCursorBtn');
             const originalText = btn?.textContent || '回退游标并重扫';
 
-            if (!confirm(`确定要回退 ${currentForwardingLogAccountEmail || '该账号'} 的转发游标，并立即重扫最近邮件吗？\n\n已成功转发过的邮件仍会因为去重记录被跳过。`)) {
+            if (!(await showConfirmModal(`确定要回退 ${currentForwardingLogAccountEmail || '该账号'} 的转发游标，并立即重扫最近邮件吗？\n\n已成功转发过的邮件仍会因为去重记录被跳过。`, { title: '回退转发游标', confirmText: '确认回退' }))) {
                 return;
             }
 
@@ -793,6 +1543,42 @@
                 .replace(/>/g, '&gt;')
                 .replace(/"/g, '&quot;')
                 .replace(/'/g, '&#39;');
+        }
+
+        function renderEmptyStateMarkup(icon, text, options = {}) {
+            const {
+                allowHtml = false,
+                actionLabel = '刷新',
+                actionTitle = '刷新列表',
+                onAction = ''
+            } = options;
+
+            const content = allowHtml ? String(text || '') : escapeHtml(text || '');
+            const hasAction = typeof onAction === 'string' && onAction.trim() !== '';
+
+            return `
+                <div class="empty-state">
+                    <div class="empty-state-icon">${icon}</div>
+                    <div class="empty-state-text">${content}</div>
+                    ${hasAction ? `
+                        <button
+                            class="empty-state-refresh-btn"
+                            type="button"
+                            onclick="${onAction}"
+                            title="${escapeHtml(actionTitle)}"
+                            aria-label="${escapeHtml(actionTitle)}"
+                        >
+                            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+                                <path d="M13.5 3.5v3h-3"></path>
+                                <path d="M2.5 12.5v-3h3"></path>
+                                <path d="M4 6.25A4.75 4.75 0 0 1 12.05 4"></path>
+                                <path d="M12 9.75A4.75 4.75 0 0 1 3.95 12"></path>
+                            </svg>
+                            <span>${escapeHtml(actionLabel)}</span>
+                        </button>
+                    ` : ''}
+                </div>
+            `;
         }
 
         function parseJsonLike(value) {
@@ -1062,7 +1848,8 @@ ${details}
                 return;
             }
 
-            nameEl.textContent = group.name || '未命名分组';
-            idBadgeEl.textContent = `groupId ${group.id}`;
-            idBadgeEl.style.display = 'inline-flex';
+            const badgeText = formatGroupIdBadgeText(group.id);
+            nameEl.textContent = normalizeGroupName(group.name);
+            idBadgeEl.textContent = badgeText;
+            idBadgeEl.style.display = badgeText ? 'inline-flex' : 'none';
         }

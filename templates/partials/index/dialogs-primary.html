@@ -1,5 +1,5 @@
     <!-- 添加分组模态框 -->
-    <div class="modal" id="addGroupModal" onclick="if(event.target === this) hideAddGroupModal()">
+    <div class="modal" id="addGroupModal" onmousedown="if(event.target === this) hideAddGroupModal()">
         <div class="modal-content">
             <div class="modal-header">
                 <h3 id="groupModalTitle">添加分组</h3>
@@ -77,7 +77,7 @@
     </div>
 
     <!-- 添加账号模态框 -->
-    <div class="modal" id="addAccountModal" onclick="if(event.target === this) hideAddAccountModal()">
+    <div class="modal" id="addAccountModal" onmousedown="if(event.target === this) hideAddAccountModal()">
         <div class="modal-content">
             <div class="modal-header">
                 <h3>导入邮箱账号</h3>
@@ -108,6 +108,7 @@
                         <option value="126">126</option>
                         <option value="yahoo">Yahoo</option>
                         <option value="aliyun">Aliyun</option>
+                        <option value="2925">2925邮箱</option>
                         <option value="custom">自定义 IMAP</option>
                     </select>
                 </div>
@@ -147,7 +148,7 @@
     </div>
 
     <!-- 编辑账号模态框 -->
-    <div class="modal" id="editAccountModal" onclick="if(event.target === this) hideEditAccountModal()">
+    <div class="modal" id="editAccountModal" onmousedown="if(event.target === this) hideEditAccountModal()">
         <div class="modal-content">
             <div class="modal-header">
                 <h3>编辑邮箱账号</h3>
@@ -169,6 +170,7 @@
                         <option value="126">126</option>
                         <option value="yahoo">Yahoo</option>
                         <option value="aliyun">Aliyun</option>
+                        <option value="2925">2925邮箱</option>
                         <option value="custom">自定义 IMAP</option>
                     </select>
                 </div>
@@ -207,6 +209,11 @@
                     </select>
                 </div>
                 <div class="form-group">
+                    <label class="form-label">排序值</label>
+                    <input type="number" class="form-input" id="editSortOrder" min="0" step="1" value="0">
+                    <div class="form-hint">值越小越靠前，填 0 表示不参与自定义排序。</div>
+                </div>
+                <div class="form-group">
                     <label class="form-label">备注</label>
                     <textarea class="form-textarea" id="editRemark" placeholder="可选" rows="3"></textarea>
                 </div>
@@ -232,7 +239,7 @@
     </div>
 
     <!-- 导出邮箱模态框 -->
-    <div class="modal" id="exportModal" onclick="if(event.target === this) hideExportModal()">
+    <div class="modal" id="exportModal" onmousedown="if(event.target === this) hideExportModal()">
         <div class="modal-content" style="width: 500px;">
             <div class="modal-header">
                 <h3>导出邮箱</h3>
@@ -261,7 +268,7 @@
     </div>
 
     <!-- 导出密码确认模态框 -->
-    <div class="modal" id="exportVerifyModal" onclick="if(event.target === this) hideExportVerifyModal()">
+    <div class="modal" id="exportVerifyModal" onmousedown="if(event.target === this) hideExportVerifyModal()">
         <div class="modal-content" style="width: 400px;">
             <div class="modal-header">
                 <h3>🔐 安全验证</h3>

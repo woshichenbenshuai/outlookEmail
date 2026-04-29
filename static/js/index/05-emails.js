@@ -1,4 +1,4 @@
-        /* global adjustIframeHeight, closeMobilePanels, closeNavbarActionsMenu, copyCurrentEmail, currentAccount, currentEmailDetail, currentEmailId, currentEmails, currentFolder, currentMethod, emailListCache, escapeHtml, formatDate, handleApiError, isTempEmailGroup, showMobileEmailDetail, showToast, updateMobileContext, updateModalBodyState */
+        /* global EMAIL_DETAIL_REQUEST_TIMEOUT_MS, EMAIL_LIST_REQUEST_TIMEOUT_MS, adjustIframeHeight, applyEmailListCache, closeMobilePanels, closeNavbarActionsMenu, copyCurrentEmail, currentAccount, currentEmailDetail, currentEmailId, currentEmails, currentFolder, currentMethod, currentSkip, emailListCache, escapeHtml, fetchWithTimeout, formatDate, getEmailListCacheEntry, getFolderDisplayName, getNextEmailSkipFromCache, handleApiError, hasMoreEmails, invalidateEmailListCache, isTempEmailGroup, isTimeoutAbortError, normalizeFolderSummaries, renderEmptyStateMarkup, scheduleEmailListLoadCheck, showMobileEmailDetail, showToast, updateMobileContext, updateModalBodyState */
 
         // ==================== 邮件相关 ====================
 
@@ -12,20 +12,9 @@
 
             // 检查缓存
             const cacheKey = `${email}_${currentFolder}`;
-            if (!forceRefresh && emailListCache[cacheKey]) {
-                const cache = emailListCache[cacheKey];
-                currentEmails = cache.emails;
-                hasMoreEmails = cache.has_more;
-                currentSkip = cache.skip;
-                currentMethod = cache.method || 'graph';
-
-                // 恢复 UI
-                const methodTag = document.getElementById('methodTag');
-                methodTag.textContent = currentMethod;
-                methodTag.style.display = 'inline';
-                document.getElementById('emailCount').textContent = `(${currentEmails.length})`;
-
-                renderEmailList(currentEmails);
+            const cache = !forceRefresh ? getEmailListCacheEntry(email, currentFolder) : null;
+            if (cache) {
+                applyEmailListCache(cache, { scheduleLoadCheck: false });
                 return;
             }
 
@@ -46,22 +35,32 @@
 
             try {
                 // 每次只查询20封邮件
-                const response = await fetch(
-                    `/api/emails/${encodeURIComponent(email)}?method=${currentMethod}&folder=${currentFolder}&skip=0&top=20`
+                const response = await fetchWithTimeout(
+                    `/api/emails/${encodeURIComponent(email)}?method=${currentMethod}&folder=${currentFolder}&skip=0&top=20`,
+                    {
+                        timeoutMs: EMAIL_LIST_REQUEST_TIMEOUT_MS,
+                        timeoutMessage: '获取邮件超时，请检查网络、代理或账号配置后重试'
+                    }
                 );
                 const data = await response.json();
 
                 if (data.success) {
                     currentEmails = data.emails;
-                    currentMethod = data.method === 'Graph API' ? 'graph' : 'imap';
+                    currentMethod = data.request_method || (data.method === 'Graph API' ? 'graph' : 'imap');
                     hasMoreEmails = data.has_more;
+                    currentSkip = currentEmails.length;
 
                     // 保存到缓存
                     emailListCache[cacheKey] = {
                         emails: currentEmails,
                         has_more: hasMoreEmails,
                         skip: currentSkip,
-                        method: currentMethod
+                        method: currentMethod,
+                        method_label: data.method || currentMethod,
+                        derived_from: null,
+                        folder_summaries: currentFolder === 'all'
+                            ? normalizeFolderSummaries(data.folder_summaries)
+                            : undefined
                     };
 
                     // 显示使用的方法和邮件数量
@@ -72,6 +71,7 @@
                     document.getElementById('emailCount').textContent = `(${data.emails.length})`;
 
                     renderEmailList(data.emails);
+                    scheduleEmailListLoadCheck(80);
                 } else {
                     // 显示详细的多方法失败弹框
                     const fetchErrorDetails = data.details || (data.error ? { error: data.error } : {});
@@ -80,21 +80,25 @@
                     } else {
                         handleApiError(data, '获取邮件失败');
                     }
-                    container.innerHTML = `
-                        <div class="empty-state">
-                            <div class="empty-state-icon">⚠️</div>
-                            <div class="empty-state-text">获取邮件失败，<a href="javascript:void(0)" onclick="showEmailFetchErrorModal(window._lastFetchErrorDetails)" style="color:#409eff;text-decoration:underline;">点击查看详情</a></div>
-                        </div>
-                    `;
+                    container.innerHTML = renderEmptyStateMarkup(
+                        '⚠️',
+                        '获取邮件失败，<a href="javascript:void(0)" onclick="showEmailFetchErrorModal(window._lastFetchErrorDetails)" style="color:#409eff;text-decoration:underline;">点击查看详情</a>',
+                        {
+                            allowHtml: true,
+                            onAction: 'refreshEmails()',
+                            actionTitle: '刷新邮件列表'
+                        }
+                    );
                     window._lastFetchErrorDetails = fetchErrorDetails;
                 }
             } catch (error) {
-                container.innerHTML = `
-                    <div class="empty-state">
-                        <div class="empty-state-icon">⚠️</div>
-                        <div class="empty-state-text">网络错误，请重试</div>
-                    </div>
-                `;
+                const errorMessage = isTimeoutAbortError(error)
+                    ? '获取邮件超时，请重试'
+                    : '网络错误，请重试';
+                container.innerHTML = renderEmptyStateMarkup('⚠️', errorMessage, {
+                    onAction: 'refreshEmails()',
+                    actionTitle: '刷新邮件列表'
+                });
             } finally {
                 // 启用按钮
                 if (refreshBtn) {
@@ -108,6 +112,7 @@
         // 渲染邮件列表
         // Selected email IDs
         let selectedEmailIds = new Set();
+        let pendingReadEmailIds = new Set();
         let isBatchSelectMode = false;
 
         function getRecipientDisplayLabel(emailItem) {
@@ -133,16 +138,74 @@
             return `to: ${toValue}`;
         }
 
+        function getEmailSourceLabel(emailItem) {
+            if (isTempEmailGroup || currentFolder !== 'all' || !emailItem?.folder) {
+                return '';
+            }
+            return getFolderDisplayName(emailItem?.folder);
+        }
+
+        function formatAttachmentSize(size) {
+            const numericSize = Number(size) || 0;
+            if (numericSize < 1024) {
+                return `${numericSize} B`;
+            }
+            if (numericSize < 1024 * 1024) {
+                return `${(numericSize / 1024).toFixed(1).replace(/\\.0$/, '')} KB`;
+            }
+            return `${(numericSize / (1024 * 1024)).toFixed(1).replace(/\\.0$/, '')} MB`;
+        }
+
+        function buildAttachmentDownloadUrl(email, attachment) {
+            const folder = encodeURIComponent(email?.folder || currentFolder || 'inbox');
+            const method = encodeURIComponent(currentMethod || 'graph');
+            return `/api/email/${encodeURIComponent(currentAccount)}/${encodeURIComponent(email.id)}/attachments/${encodeURIComponent(attachment.id)}?method=${method}&folder=${folder}`;
+        }
+
+        function renderAttachmentSection(email) {
+            const attachments = Array.isArray(email?.attachments) ? email.attachments : [];
+            if (attachments.length === 0) {
+                return '';
+            }
+
+            return `
+                <section class="email-attachments" aria-label="邮件附件">
+                    <div class="email-attachments__header">
+                        <div class="email-attachments__title">附件</div>
+                        <div class="email-attachments__count">${attachments.length} 个</div>
+                    </div>
+                    <div class="email-attachments__list">
+                        ${attachments.map(attachment => `
+                            <a class="email-attachment-item"
+                               href="${buildAttachmentDownloadUrl(email, attachment)}"
+                               download="${escapeHtml(attachment.name || 'attachment')}">
+                                <span class="email-attachment-item__icon" aria-hidden="true">📎</span>
+                                <span class="email-attachment-item__content">
+                                    <span class="email-attachment-item__name">${escapeHtml(attachment.name || 'attachment')}</span>
+                                    <span class="email-attachment-item__meta">
+                                        ${attachment.is_inline ? '<span class="email-attachment-item__badge">内联</span>' : ''}
+                                        <span>${formatAttachmentSize(attachment.size)}</span>
+                                        <span>${escapeHtml(attachment.content_type || 'application/octet-stream')}</span>
+                                    </span>
+                                </span>
+                            </a>
+                        `).join('')}
+                    </div>
+                </section>
+            `;
+        }
+
         function renderEmailList(emails) {
             const container = document.getElementById('emailList');
 
             if (emails.length === 0) {
-                container.innerHTML = `
-                    <div class="empty-state">
-                        <div class="empty-state-icon">📭</div>
-                        <div class="empty-state-text">收件箱为空</div>
-                    </div>
-                `;
+                const emptyStateText = isTempEmailGroup
+                    ? '暂无邮件'
+                    : `${getFolderDisplayName(currentFolder)}为空`;
+                container.innerHTML = renderEmptyStateMarkup('📭', emptyStateText, {
+                    onAction: 'refreshEmails()',
+                    actionTitle: '刷新邮件列表'
+                });
                 // Reset selection
                 selectedEmailIds.clear();
                 currentEmailId = null;
@@ -157,6 +220,8 @@
                 const isChecked = selectedEmailIds.has(email.id);
                 const isActive = currentEmailId === email.id;
                 const recipientDisplayLabel = getRecipientDisplayLabel(email);
+                const sourceLabel = getEmailSourceLabel(email);
+                const hasAttachments = Boolean(email.has_attachments);
                 return `
                 <div class="email-item ${email.is_read === false ? 'unread' : ''} ${isActive ? 'active' : ''}"
                      onclick="${clickHandler}('${email.id}', ${index})">
@@ -166,10 +231,13 @@
                     <div class="email-body">
                         <div class="email-top-row">
                             <div class="email-top-main">
+                                ${email.is_read === false ? '<span class="email-unread-dot" title="未读" aria-label="未读"></span>' : ''}
                                 <div class="email-sender-block">
                                     <div class="email-from" title="${escapeHtml(email.from || '未知发件人')}">${escapeHtml(email.from || '未知发件人')}</div>
                                     ${recipientDisplayLabel ? `<div class="email-recipient" title="${escapeHtml(recipientDisplayLabel)}">${escapeHtml(recipientDisplayLabel)}</div>` : ''}
                                 </div>
+                                ${hasAttachments ? '<span class="email-attachment-indicator" title="含附件" aria-label="含附件">📎</span>' : ''}
+                                ${sourceLabel ? `<span class="email-folder-badge email-folder-badge--${escapeHtml(String(email.folder || '').toLowerCase())}">${escapeHtml(sourceLabel)}</span>` : ''}
                             </div>
                             <div class="email-date">${formatDate(email.date)}</div>
                         </div>
@@ -180,6 +248,125 @@
             `}).join('');
 
             updateEmailBatchActionBar();
+        }
+
+        function getSelectedEmailItems() {
+            const selectedIds = new Set(Array.from(selectedEmailIds).map(id => String(id)));
+            if (!selectedIds.size) {
+                return [];
+            }
+
+            return currentEmails.filter(email => selectedIds.has(String(email.id)));
+        }
+
+        function applyEmailReadState(updatedIds, isRead = true) {
+            const normalizedIds = new Set((updatedIds || []).map(id => String(id)).filter(Boolean));
+            if (!normalizedIds.size) {
+                return;
+            }
+
+            const applyToEmailList = (emails) => {
+                if (!Array.isArray(emails)) {
+                    return;
+                }
+
+                emails.forEach(email => {
+                    if (normalizedIds.has(String(email.id))) {
+                        email.is_read = isRead;
+                    }
+                });
+            };
+
+            applyToEmailList(currentEmails);
+
+            const cachePrefix = `${currentAccount || ''}_`;
+            Object.entries(emailListCache).forEach(([cacheKey, cacheValue]) => {
+                if (!cacheKey.startsWith(cachePrefix)) {
+                    return;
+                }
+                applyToEmailList(cacheValue?.emails);
+            });
+
+            if (currentEmailDetail && normalizedIds.has(String(currentEmailDetail.id))) {
+                currentEmailDetail.is_read = isRead;
+            }
+        }
+
+        async function requestMarkEmailsAsRead(items, { silent = false } = {}) {
+            const normalizedItems = (items || [])
+                .map(item => {
+                    if (!item?.id) {
+                        return null;
+                    }
+                    return {
+                        id: String(item.id),
+                        folder: String(item.folder || currentFolder || 'inbox'),
+                        id_mode: String(item.id_mode || '')
+                    };
+                })
+                .filter(Boolean)
+                .filter(item => !pendingReadEmailIds.has(item.id));
+
+            if (!normalizedItems.length) {
+                return {
+                    success: true,
+                    success_count: 0,
+                    failed_count: 0,
+                    updated_ids: [],
+                    errors: []
+                };
+            }
+
+            normalizedItems.forEach(item => pendingReadEmailIds.add(item.id));
+
+            try {
+                const response = await fetch('/api/emails/mark-read', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        email: currentAccount,
+                        method: currentMethod,
+                        folder: currentFolder,
+                        items: normalizedItems
+                    })
+                });
+                const result = await response.json();
+                const updatedIds = Array.isArray(result.updated_ids) ? result.updated_ids : [];
+
+                if (updatedIds.length > 0) {
+                    applyEmailReadState(updatedIds, true);
+                    renderEmailList(currentEmails);
+                }
+
+                if (!silent) {
+                    if (result.success_count > 0 && result.failed_count === 0) {
+                        showToast(`已将 ${result.success_count} 封邮件设为已读`);
+                    } else if (result.success_count > 0) {
+                        showToast(`已设为已读 ${result.success_count} 封，失败 ${result.failed_count} 封`, 'warning');
+                    } else {
+                        handleApiError(result, '设为已读失败');
+                    }
+                }
+
+                if (result.failed_count > 0 && Array.isArray(result.errors) && result.errors.length > 0) {
+                    console.warn('Mark read errors:', result.errors);
+                }
+
+                return result;
+            } catch (error) {
+                if (!silent) {
+                    showToast('设为已读失败，请检查网络后重试', 'error');
+                }
+                return {
+                    success: false,
+                    success_count: 0,
+                    failed_count: normalizedItems.length,
+                    updated_ids: [],
+                    errors: [error]
+                };
+            } finally {
+                normalizedItems.forEach(item => pendingReadEmailIds.delete(item.id));
+            }
         }
 
         function toggleEmailSelection(emailId) {
@@ -198,10 +385,19 @@
         function updateEmailBatchActionBar() {
             const bar = document.getElementById('emailBatchActionBar');
             const selectAllBtn = document.getElementById('emailSelectAllBtn');
+            const markReadBtn = document.getElementById('batchMarkReadBtn');
             const panel = document.getElementById('emailListPanel');
+            const selectedEmails = getSelectedEmailItems();
+            const unreadSelectedCount = selectedEmails.filter(email => email.is_read === false).length;
             if (isTempEmailGroup) {
                 bar.style.display = 'none';
                 panel?.classList.remove('batch-toolbar-active');
+                if (markReadBtn) {
+                    markReadBtn.disabled = false;
+                    markReadBtn.dataset.loading = 'false';
+                    markReadBtn.textContent = '设为已读';
+                    markReadBtn.title = '';
+                }
                 return;
             }
             if (selectedEmailIds.size > 0) {
@@ -213,9 +409,25 @@
                         ? '取消全选'
                         : '全选';
                 }
+                if (markReadBtn) {
+                    const isMarking = markReadBtn.dataset.loading === 'true';
+                    markReadBtn.disabled = unreadSelectedCount === 0 || isMarking;
+                    markReadBtn.title = unreadSelectedCount === 0 ? '所选邮件已全部为已读' : '';
+                    if (!isMarking) {
+                        markReadBtn.textContent = unreadSelectedCount > 0
+                            ? `设为已读${unreadSelectedCount !== selectedEmails.length ? ` (${unreadSelectedCount})` : ''}`
+                            : '设为已读';
+                    }
+                }
             } else {
                 bar.style.display = 'none';
                 panel?.classList.remove('batch-toolbar-active');
+                if (markReadBtn) {
+                    markReadBtn.disabled = false;
+                    markReadBtn.dataset.loading = 'false';
+                    markReadBtn.textContent = '设为已读';
+                    markReadBtn.title = '';
+                }
             }
         }
 
@@ -237,10 +449,39 @@
             renderEmailList(currentEmails);
         }
 
+        async function markSelectedEmailsAsRead() {
+            const btn = document.getElementById('batchMarkReadBtn');
+            if (!btn || btn.disabled) return;
+
+            const unreadItems = getSelectedEmailItems()
+                .filter(email => email.is_read === false)
+                .map(email => ({
+                    id: email.id,
+                    folder: email.folder || currentFolder || 'inbox',
+                    id_mode: email.id_mode || ''
+                }));
+
+            if (!unreadItems.length) {
+                showToast('所选邮件已全部为已读');
+                return;
+            }
+
+            btn.disabled = true;
+            btn.dataset.loading = 'true';
+            btn.textContent = '设置中...';
+
+            try {
+                await requestMarkEmailsAsRead(unreadItems);
+            } finally {
+                btn.dataset.loading = 'false';
+                updateEmailBatchActionBar();
+            }
+        }
+
         async function confirmBatchDeleteEmails() {
             if (selectedEmailIds.size === 0) return;
 
-            if (!confirm(`确定要永久删除选中的 ${selectedEmailIds.size} 封邮件吗？此操作不可恢复！`)) {
+            if (!(await showConfirmModal(`确定要永久删除选中的 ${selectedEmailIds.size} 封邮件吗？此操作不可恢复！`, { title: '批量删除邮件', confirmText: '确认删除' }))) {
                 return;
             }
 
@@ -251,7 +492,7 @@
             if (isTempEmailGroup) return;
             if (!currentEmailDetail || !currentEmailDetail.id) return;
 
-            if (!confirm('确定要永久删除这封邮件吗？此操作不可恢复！')) {
+            if (!(await showConfirmModal('确定要永久删除这封邮件吗？此操作不可恢复！', { title: '删除邮件', confirmText: '确认删除' }))) {
                 return;
             }
 
@@ -316,6 +557,10 @@
         // 选择邮件
         async function selectEmail(messageId, index) {
             currentEmailId = messageId;
+            const selectedEmail = currentEmails.find(email => email.id === messageId);
+            const requestFolder = currentFolder === 'all'
+                ? (selectedEmail?.folder || 'inbox')
+                : currentFolder;
             // 更新 UI
             document.querySelectorAll('.email-item').forEach((item, i) => {
                 item.classList.toggle('active', i === index);
@@ -340,12 +585,25 @@
             container.innerHTML = '<div class="loading"><div class="loading-spinner"></div></div>';
 
             try {
-                const response = await fetch(`/api/email/${encodeURIComponent(currentAccount)}/${encodeURIComponent(messageId)}?method=${currentMethod}&folder=${currentFolder}`);
+                const response = await fetchWithTimeout(
+                    `/api/email/${encodeURIComponent(currentAccount)}/${encodeURIComponent(messageId)}?method=${currentMethod}&folder=${requestFolder}`,
+                    {
+                        timeoutMs: EMAIL_DETAIL_REQUEST_TIMEOUT_MS,
+                        timeoutMessage: '加载邮件详情超时，请稍后重试'
+                    }
+                );
                 const data = await response.json();
 
                 if (data.success) {
-                    currentEmailDetail = data.email;
-                    renderEmailDetail(data.email);
+                    currentEmailDetail = { ...data.email, folder: requestFolder };
+                    renderEmailDetail(currentEmailDetail);
+                    if (selectedEmail?.is_read === false) {
+                        void requestMarkEmailsAsRead([{
+                            id: messageId,
+                            folder: requestFolder,
+                            id_mode: selectedEmail.id_mode || ''
+                        }], { silent: true });
+                    }
                 } else {
                     handleApiError(data, '加载邮件详情失败');
                     container.innerHTML = `
@@ -356,10 +614,13 @@
                     `;
                 }
             } catch (error) {
+                const errorMessage = isTimeoutAbortError(error)
+                    ? '加载邮件详情超时，请重试'
+                    : '网络错误，请重试';
                 container.innerHTML = `
                     <div class="empty-state">
                         <div class="empty-state-icon">⚠️</div>
-                        <div class="empty-state-text">网络错误，请重试</div>
+                        <div class="empty-state-text">${errorMessage}</div>
                     </div>
                 `;
             }
@@ -427,6 +688,7 @@
             container.innerHTML = `
                 ${detailHeader}
                 <div class="email-detail-body">
+                    ${renderAttachmentSection(email)}
                     ${bodyContent}
                 </div>
             `;
@@ -624,10 +886,10 @@
             checkbox?.closest('.email-trust-toggle')?.classList.toggle('is-active', !!checkbox?.checked);
         }
 
-        function toggleTrustMode(checkbox) {
+        async function toggleTrustMode(checkbox) {
             updateTrustToggleState(checkbox);
             if (checkbox.checked) {
-                if (confirm('⚠️ 警告：启用信任模式将直接显示邮件原始内容，不进行任何安全过滤。\n\n这可能包含恶意脚本或不安全的内容。您确定要继续吗？')) {
+                if (await showConfirmModal('⚠️ 警告：启用信任模式将直接显示邮件原始内容，不进行任何安全过滤。\n\n这可能包含恶意脚本或不安全的内容。您确定要继续吗？', { title: '启用信任模式', confirmText: '确认启用' })) {
                     isTrustedMode = true;
                     if (currentEmailDetail) {
                         renderEmailDetail(currentEmailDetail);
@@ -705,13 +967,16 @@
         }
 
         // 显示邮件列表（移动端）
-        function showEmailList() {
+        function showEmailList({ scheduleLoadCheck = true } = {}) {
             document.getElementById('emailListPanel').classList.remove('hidden');
             isListVisible = true;
             document.getElementById('toggleListText').textContent = '隐藏列表';
             closeMobilePanels();
             closeNavbarActionsMenu();
             updateMobileContext();
+            if (scheduleLoadCheck) {
+                scheduleEmailListLoadCheck(0);
+            }
         }
 
         // 刷新邮件
@@ -721,8 +986,7 @@
                     loadTempEmailMessages(currentAccount);
                 } else {
                     // 清除当前缓存并强制刷新
-                    const cacheKey = `${currentAccount}_${currentFolder}`;
-                    delete emailListCache[cacheKey];
+                    invalidateEmailListCache(currentAccount, currentFolder);
                     loadEmails(currentAccount, true);
                 }
             } else {
@@ -730,20 +994,32 @@
             }
         }
 
-        // 复制邮箱地址
-        function copyEmail(email) {
-            navigator.clipboard.writeText(email).then(() => {
-                showToast('邮箱地址已复制', 'success');
-            }).catch(() => {
-                // 降级方案
+        function copyTextToClipboard(text, successMessage = '内容已复制') {
+            const fallbackCopy = () => {
                 const textarea = document.createElement('textarea');
-                textarea.value = email;
+                textarea.value = text;
                 document.body.appendChild(textarea);
                 textarea.select();
                 document.execCommand('copy');
                 document.body.removeChild(textarea);
-                showToast('邮箱地址已复制', 'success');
-            });
+                showToast(successMessage, 'success');
+            };
+
+            if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+                return navigator.clipboard.writeText(text).then(() => {
+                    showToast(successMessage, 'success');
+                }).catch(() => {
+                    fallbackCopy();
+                });
+            }
+
+            fallbackCopy();
+            return Promise.resolve();
+        }
+
+        // 复制邮箱地址
+        function copyEmail(email) {
+            copyTextToClipboard(email, '邮箱地址已复制');
         }
 
         // 复制当前邮箱
@@ -756,8 +1032,8 @@
         }
 
         // 退出登录
-        function logout() {
-            if (confirm('确定要退出登录吗？')) {
+        async function logout() {
+            if (await showConfirmModal('确定要退出登录吗？', { title: '退出登录', confirmText: '确认退出', danger: false })) {
                 window.location.href = '/logout';
             }
         }

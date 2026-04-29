@@ -16,22 +16,29 @@
                 if (isNaN(date.getTime())) return dateStr;
 
                 const now = new Date();
-                const isToday = date.toDateString() === now.toDateString();
+                const timeZone = getAppTimeZone();
+                const dateKeyFormatter = new Intl.DateTimeFormat('en-CA', {
+                    timeZone,
+                    year: 'numeric',
+                    month: '2-digit',
+                    day: '2-digit'
+                });
+                const isToday = dateKeyFormatter.format(date) === dateKeyFormatter.format(now);
 
                 if (isToday) {
                     return '今天 ' + date.toLocaleTimeString('zh-CN', {
-                        timeZone: 'Asia/Shanghai',
+                        timeZone,
                         hour: '2-digit',
                         minute: '2-digit'
                     });
                 } else {
                     return date.toLocaleDateString('zh-CN', {
-                        timeZone: 'Asia/Shanghai',
+                        timeZone,
                         year: 'numeric',
                         month: 'long',
                         day: 'numeric'
                     }) + ' ' + date.toLocaleTimeString('zh-CN', {
-                        timeZone: 'Asia/Shanghai',
+                        timeZone,
                         hour: '2-digit',
                         minute: '2-digit'
                     });
@@ -62,7 +69,7 @@
             document.getElementById('oauthPreviewEmail').value = oauthPreviewAccount.email || '';
             document.getElementById('oauthPreviewPassword').value = oauthPreviewAccount.password || '';
             document.getElementById('oauthPreviewClientId').value = oauthPreviewAccount.client_id || '';
-            document.getElementById('oauthPreviewGroup').value = group?.name || `分组 #${oauthPreviewAccount.group_id}`;
+            document.getElementById('oauthPreviewGroup').value = group?.name || formatGroupIdBadgeText(oauthPreviewAccount.group_id);
             document.getElementById('oauthPreviewRefreshToken').value = oauthPreviewAccount.refresh_token || '';
             if (resultEl) {
                 resultEl.style.display = 'block';

@@ -1,4 +1,4 @@
-        /* global accountsCache, closeMobilePanels, currentAccount, currentEmailDetail, currentEmailId, currentEmails, currentFolder, currentGroupId, currentMethod, currentSkip, emailListCache, handleApiError, hasMoreEmails, hideModal, isTempEmailGroup, loadAccountsByGroup, loadEmails, loadGroups, renderEmailList, setModalVisible, showEmailList, showToast, updateImportHint, updateMobileContext */
+        /* global accountsCache, applyEmailListCache, closeMobilePanels, currentAccount, currentEmailDetail, currentEmailId, currentEmails, currentFolder, currentGroupId, currentMethod, currentSkip, emailListCache, getEmailListCacheEntry, getNextEmailSkipFromCache, handleApiError, hasMoreEmails, hideModal, isTempEmailGroup, loadAccountsByGroup, loadEmails, loadGroups, renderEmailList, scheduleEmailListLoadCheck, setModalVisible, showEmailList, showToast, updateImportHint, updateMobileContext */
 
         // ==================== 账号相关 ====================
 
@@ -6,13 +6,13 @@
         function selectAccount(email) {
             currentAccount = email;
             isTempEmailGroup = false;
-            currentFolder = 'inbox'; // 重置为收件箱
+            currentFolder = 'all'; // 重置为全部邮件
             currentEmailId = null;
             currentEmailDetail = null;
 
             document.getElementById('currentAccount').classList.add('show');
             document.getElementById('currentAccountEmail').textContent = email;
-            showEmailList();
+            showEmailList({ scheduleLoadCheck: false });
             closeMobilePanels();
             updateMobileContext();
 
@@ -28,34 +28,22 @@
             const folderTabs = document.getElementById('folderTabs');
             if (folderTabs) {
                 folderTabs.style.display = 'flex';
-                // 重置为收件箱
+                // 重置为全部邮件
                 document.querySelectorAll('.folder-tab').forEach(tab => {
-                    tab.classList.toggle('active', tab.dataset.folder === 'inbox');
+                    tab.classList.toggle('active', tab.dataset.folder === 'all');
                 });
             }
 
-            const cacheKey = `${email}_inbox`;
+            const cache = getEmailListCacheEntry(email, 'all');
 
             // 检查缓存
-            if (emailListCache[cacheKey]) {
-                const cache = emailListCache[cacheKey];
-                currentEmails = cache.emails;
-                hasMoreEmails = cache.has_more;
-                currentSkip = cache.skip;
-                currentMethod = cache.method || 'graph';
-
-                // 恢复 UI
-                const methodTag = document.getElementById('methodTag');
-                methodTag.textContent = currentMethod;
-                methodTag.style.display = 'inline';
-                document.getElementById('emailCount').textContent = `(${currentEmails.length})`;
-
-                renderEmailList(currentEmails);
+            if (cache) {
+                applyEmailListCache(cache, { scheduleLoadCheck: false });
             } else {
                 document.getElementById('emailList').innerHTML = `
                     <div class="empty-state">
                         <div class="empty-state-icon">📬</div>
-                        <div class="empty-state-text">正在自动刷新收件箱...</div>
+                        <div class="empty-state-text">正在自动刷新全部邮件...</div>
                     </div>
                 `;
                 document.getElementById('emailCount').textContent = '';
@@ -71,8 +59,10 @@
             `;
             document.getElementById('emailDetailToolbar').style.display = 'none';
 
-            // 选中账号后自动刷新收件箱
-            loadEmails(email, true);
+            // 首次进入未命中缓存时才自动加载
+            if (!cache) {
+                loadEmails(email);
+            }
         }
 
         // 显示添加账号模态框
@@ -238,7 +228,7 @@
             const email = document.getElementById('editEmail').value;
             const groupId = parseInt(document.getElementById('editGroupSelect').value);
 
-            if (!confirm(`确定要删除账号 ${email} 吗？`)) {
+            if (!(await showConfirmModal(`确定要删除账号 ${email} 吗？`, { title: '删除账号', confirmText: '确认删除' }))) {
                 return;
             }
 
@@ -317,7 +307,7 @@
 
         // 删除账号（快捷方式）
         async function deleteAccount(accountId, email) {
-            if (!confirm(`确定要删除账号 ${email} 吗？`)) {
+            if (!(await showConfirmModal(`确定要删除账号 ${email} 吗？`, { title: '删除账号', confirmText: '确认删除' }))) {
                 return;
             }
 
@@ -367,7 +357,10 @@
                             <input type="checkbox" class="export-group-checkbox" value="${group.id}" style="width: 16px; height: 16px;">
                             <span style="display: flex; align-items: center; gap: 8px; flex: 1;">
                                 <span style="width: 12px; height: 12px; border-radius: 3px; background-color: ${group.color || '#666'}"></span>
-                                <span style="font-size: 14px; color: #1a1a1a;">${escapeHtml(group.name)}</span>
+                                <span style="display: inline-flex; align-items: center; gap: 8px; min-width: 0; flex: 1;">
+                                    <span style="font-size: 14px; color: #1a1a1a; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(normalizeGroupName(group.name))}</span>
+                                    ${formatGroupIdBadgeText(group.id) ? `<span class="group-id-badge">${escapeHtml(formatGroupIdBadgeText(group.id))}</span>` : ''}
+                                </span>
                             </span>
                             <span style="font-size: 12px; color: #999; background-color: #f0f0f0; padding: 2px 8px; border-radius: 10px;">${group.account_count || 0}</span>
                         </label>

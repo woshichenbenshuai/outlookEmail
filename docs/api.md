@@ -131,7 +131,7 @@ curl -H "X-API-Key: your-api-key" \
 
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `email` | string | 是 | 主邮箱或别名邮箱 |
+| `email` | string | 是 | 主邮箱或别名邮箱；若包含 `+`，会先按完整地址匹配，未命中时再按本地部分从右到左逐级去掉 `+suffix` 回退匹配，兼容主邮箱和别名邮箱 |
 | `folder` | string | 否 | `inbox`、`junkemail`、`deleteditems`、`all`。`all` 会同时抓取收件箱和垃圾邮件并按时间倒序合并 |
 | `skip` | int | 否 | 分页偏移，默认 `0`。当 `folder=all` 时，对每个文件夹分别跳过 `skip` 封 |
 | `top` | int | 否 | 返回数量，默认 `1`，最大 `50`。当 `folder=all` 时，表示每个文件夹各取 `top` 封 |
@@ -188,7 +188,8 @@ curl -H "X-API-Key: your-api-key" \
 - `top` 是“每个文件夹各取多少封”
 - 例如 `top=1` 时，最多返回 `收件箱 1 + 垃圾邮件 1 = 2` 封
 - `skip` 也是“每个文件夹各跳过多少封”
-- 结果按邮件时间统一倒序排序
+- 结果按标准化后的邮件时间统一倒序排序
+- IMAP 场景会优先使用服务器返回的 `INTERNALDATE`；同时兼容 `Tue, 14 Apr 2026 08:20:50 +0000 (UTC)` 这类时间格式
 - 每条邮件会带上 `folder`
 - 若其中一个文件夹成功、另一个失败，会返回：
   - `success: true`
@@ -479,6 +480,7 @@ curl -H "X-API-Key: your-api-key" \
 | POST | `/api/tags` | JSON: `name`、`color?` | 创建标签 |
 | DELETE | `/api/tags/<tag_id>` | 路径参数 `tag_id` | 删除标签 |
 | POST | `/api/accounts/tags` | JSON: `account_ids`、`tag_id`、`action` | 批量给账号加标签或移除标签 |
+| POST | `/api/temp-emails/tags` | JSON: `temp_email_ids`、`tag_id`、`action` | 批量给临时邮箱加标签或移除标签 |
 
 批量标签管理请求示例：
 
@@ -487,6 +489,384 @@ curl -H "X-API-Key: your-api-key" \
   "account_ids": [1, 2, 3],
   "tag_id": 8,
   "action": "add"
+}
+```
+
+临时邮箱批量标签请求示例：
+
+```json
+{
+  "temp_email_ids": [11, 12],
+  "tag_id": 8,
+  "action": "remove"
+}
+```
+
+## 项目管理
+
+项目接口用于按 `project_key` 管理“邮箱在某个项目下的独立状态”。
+
+- 同一个邮箱可以同时存在于多个项目中
+- 项目内状态独立维护，互不影响
+- 当前项目状态包括：
+  - `toClaim`：可领取
+  - `claiming`：领取中
+  - `done`：已成功消费，不再自动分配
+  - `failed`：最近一次消费失败，需人工重置后才可再次分配
+  - `removed`：人工移出项目范围
+  - `deleted`：系统主表里的账号已删除，但项目历史仍保留
+
+### GET `/api/projects`
+
+获取项目列表。
+
+#### 成功响应示例
+
+```json
+{
+  "success": true,
+  "data": {
+    "projects": [
+      {
+        "id": 1,
+        "name": "GPT 注册",
+        "project_key": "gpt",
+        "description": "GPT 注册项目",
+        "scope_mode": "groups",
+        "use_alias_email": false,
+        "status": "active",
+        "group_ids": [1, 2],
+        "total_count": 500,
+        "to_claim_count": 120,
+        "claiming_count": 5,
+        "failed_count": 8,
+        "done_count": 360,
+        "removed_count": 15,
+        "deleted_count": 3,
+        "last_scope_synced_at": "2026-04-15T09:30:00+00:00",
+        "created_at": "2026-04-10 08:00:00",
+        "updated_at": "2026-04-15T09:30:00+00:00"
+      }
+    ]
+  }
+}
+```
+
+### GET `/api/projects/<project_key>`
+
+获取单个项目详情。
+
+### POST `/api/projects/start`
+
+启动项目。
+
+这个接口合并了“创建项目”和“补全项目范围”两种语义：
+
+- 如果 `project_key` 不存在：
+  - 创建新项目
+  - 保存项目范围
+  - 把范围内邮箱补入项目
+- 如果 `project_key` 已存在：
+  - 视为再次启动同一项目
+  - 默认沿用原有范围
+  - 如果本次显式传了 `group_ids`，会更新范围后再补全
+  - 只补新增邮箱，不会重置已有项目状态
+
+删除补偿规则：
+
+- 启动项目时会检查项目历史中已失联的账号
+- 若项目记录对应的账号已从 `accounts` 主表删除，则该项目记录会标为 `deleted`
+- 若同一个邮箱地址后来被重新导入系统，启动项目时会按邮箱地址复用旧项目记录，而不是把它当成全新邮箱
+
+别名邮箱规则：
+
+- `use_alias_email=false` 时，项目按主邮箱地址入池
+- `use_alias_email=true` 时，优先按账号别名邮箱入池
+- 若某个账号没有配置别名，则在 `use_alias_email=true` 时仍会回退使用主邮箱地址
+- 再次启动已存在项目时，如果不显式传 `use_alias_email`，会沿用当前项目配置
+
+#### 请求体
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `project_key` | string | 是 | 项目标识，内部会转成小写并去掉首尾空格 |
+| `name` | string | 否 | 项目名称。首次创建时不传则默认使用 `project_key` |
+| `description` | string | 否 | 项目描述 |
+| `group_ids` | array<int> | 否 | 项目范围分组列表；不传时首次创建默认为全量邮箱范围 |
+| `use_alias_email` | bool | 否 | 是否优先把别名邮箱加入项目；默认 `false` |
+
+#### 请求示例
+
+首次创建分组范围项目：
+
+```json
+{
+  "project_key": "gpt",
+  "name": "GPT 注册",
+  "description": "GPT 注册项目",
+  "group_ids": [1, 2],
+  "use_alias_email": true
+}
+```
+
+首次创建全量范围项目：
+
+```json
+{
+  "project_key": "google",
+  "name": "Google 注册"
+}
+```
+
+再次启动已有项目：
+
+```json
+{
+  "project_key": "gpt"
+}
+```
+
+#### 成功响应示例
+
+```json
+{
+  "success": true,
+  "message": "项目已启动",
+  "data": {
+    "id": 1,
+    "name": "GPT 注册",
+    "project_key": "gpt",
+    "description": "GPT 注册项目",
+    "scope_mode": "groups",
+    "use_alias_email": true,
+    "status": "active",
+    "group_ids": [1, 2],
+    "total_count": 560,
+    "to_claim_count": 120,
+    "claiming_count": 5,
+    "failed_count": 8,
+    "done_count": 360,
+    "removed_count": 15,
+    "deleted_count": 3,
+    "created": false,
+    "added_count": 128
+  }
+}
+```
+
+#### 返回重点字段
+
+| 字段 | 说明 |
+| --- | --- |
+| `created` | 本次是否首次创建该项目 |
+| `added_count` | 本次启动新补入的邮箱数量 |
+| `deleted_count` | 本次启动过程中被标记为 `deleted` 的项目邮箱数量 |
+| `use_alias_email` | 当前项目是否按别名邮箱入池 |
+
+### GET `/api/projects/<project_key>/accounts`
+
+获取某个项目下的邮箱列表。
+
+#### 查询参数
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `status` | string | 否 | 按项目状态过滤，如 `toClaim`、`failed`、`done` |
+| `group_id` | int | 否 | 按当前分组或项目来源分组过滤 |
+| `provider` | string | 否 | 按邮箱 provider 过滤 |
+| `keyword` | string | 否 | 在邮箱地址、备注里做模糊搜索 |
+
+#### 成功响应示例
+
+```json
+{
+  "success": true,
+  "data": {
+      "project": {
+        "id": 1,
+        "name": "GPT 注册",
+        "project_key": "gpt",
+        "description": "GPT 注册项目",
+        "scope_mode": "groups",
+        "use_alias_email": true,
+        "status": "active",
+        "group_ids": [1, 2],
+      "total_count": 560,
+      "to_claim_count": 120,
+      "claiming_count": 5,
+      "failed_count": 8,
+      "done_count": 360,
+      "removed_count": 15,
+      "deleted_count": 3
+    },
+    "accounts": [
+      {
+        "project_account_id": 101,
+        "account_id": 12,
+        "email": "alias@example.com",
+        "primary_email": "user@example.com",
+        "normalized_email": "alias@example.com",
+        "provider": "outlook",
+        "account_type": "outlook",
+        "group_id": 1,
+        "group_name": "默认分组",
+        "remark": "",
+        "project_status": "failed",
+        "account_status": "active",
+        "caller_id": "",
+        "task_id": "",
+        "claim_token": "",
+        "claimed_at": "",
+        "lease_expires_at": "",
+        "last_result": "failed",
+        "last_result_detail": "provider blocked",
+        "claim_count": 2,
+        "first_claimed_at": "2026-04-15T09:30:00+00:00",
+        "last_claimed_at": "2026-04-15T09:35:00+00:00",
+        "done_at": "",
+        "created_at": "2026-04-15T09:20:00+00:00",
+        "updated_at": "2026-04-15T09:36:00+00:00"
+      }
+    ]
+  }
+}
+```
+
+### POST `/api/projects/<project_key>/claim-random`
+
+从项目里随机领取一个可用邮箱。
+
+当前实现会从项目内 `status='toClaim'` 的邮箱中选取一个，并确保该邮箱没有被其他项目中的 `claiming` 记录占用。
+
+#### 请求体
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `caller_id` | string | 是 | 调用方标识 |
+| `task_id` | string | 是 | 当前任务标识 |
+| `lease_seconds` | int | 否 | 租期秒数，默认 `600`，最大 `3600` |
+
+#### 请求示例
+
+```json
+{
+  "caller_id": "worker-1",
+  "task_id": "task-001",
+  "lease_seconds": 600
+}
+```
+
+#### 成功响应示例
+
+```json
+{
+  "success": true,
+  "data": {
+    "project_key": "gpt",
+    "project_account_id": 101,
+    "account_id": 12,
+    "email": "alias@example.com",
+    "primary_email": "user@example.com",
+    "group_id": 1,
+    "provider": "outlook",
+    "account_type": "outlook",
+    "remark": "",
+    "claim_token": "pclm_xxx",
+    "claimed_at": "2026-04-15T10:00:00+00:00",
+    "lease_expires_at": "2026-04-15T10:10:00+00:00"
+  }
+}
+```
+
+无可领取邮箱时，当前实现返回：
+
+```json
+{
+  "success": false,
+  "error": "没有可领取的项目邮箱"
+}
+```
+
+### POST `/api/projects/<project_key>/complete-success`
+
+把当前领取中的项目邮箱标记为成功。
+
+#### 请求体
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `account_id` | int | 是 | 账号 ID |
+| `claim_token` | string | 是 | 领取时返回的 token |
+| `caller_id` | string | 否 | 调用方标识 |
+| `task_id` | string | 否 | 任务标识 |
+| `detail` | string | 否 | 成功说明 |
+
+### POST `/api/projects/<project_key>/complete-failed`
+
+把当前领取中的项目邮箱标记为失败。
+
+- 状态会从 `claiming` 变成 `failed`
+- `failed` 不会自动再次参与分配
+- 需要人工调用 `/reset-failed` 后才能再次领取
+
+#### 请求示例
+
+```json
+{
+  "account_id": 12,
+  "claim_token": "pclm_xxx",
+  "caller_id": "worker-1",
+  "task_id": "task-001",
+  "detail": "provider blocked"
+}
+```
+
+### POST `/api/projects/<project_key>/release`
+
+主动释放领取中的项目邮箱。
+
+- 状态会从 `claiming` 回到 `toClaim`
+- 适合任务中断、主动放弃等场景
+
+### POST `/api/projects/<project_key>/reset-failed`
+
+人工把 `failed` 邮箱重置回 `toClaim`。
+
+#### 请求示例
+
+```json
+{
+  "account_id": 12,
+  "detail": "人工允许重试"
+}
+```
+
+### POST `/api/projects/<project_key>/remove-account`
+
+人工把项目邮箱移出项目范围。
+
+- 目标状态变成 `removed`
+- 若当前状态是 `claiming`，会拒绝移出
+
+#### 请求示例
+
+```json
+{
+  "account_id": 12,
+  "detail": "人工移出项目"
+}
+```
+
+### POST `/api/projects/<project_key>/restore-account`
+
+人工把 `removed` 项目邮箱恢复回 `toClaim`。
+
+#### 请求示例
+
+```json
+{
+  "account_id": 12,
+  "detail": "人工恢复到项目"
 }
 ```
 
@@ -534,8 +914,18 @@ curl -H "X-API-Key: your-api-key" \
 | --- | --- | --- | --- |
 | GET | `/api/accounts/refresh-logs` | Query: `limit`、`offset` | 获取所有刷新日志 |
 | GET | `/api/accounts/<account_id>/refresh-logs` | Query: `limit`、`offset` | 获取单个账号刷新日志 |
-| GET | `/api/accounts/refresh-logs/failed` | 无 | 获取最近失败刷新记录 |
-| GET | `/api/accounts/refresh-stats` | 无 | 获取刷新统计汇总 |
+| GET | `/api/accounts/refresh-logs/failed` | 无 | 获取当前失败状态邮箱快照 |
+| GET | `/api/accounts/refresh-stats` | 无 | 获取当前刷新统计快照 |
+| GET | `/api/accounts/refresh-status-list` | Query: `q`、`status`、`page`、`page_size` | 获取 Token 刷新管理邮箱列表 |
+
+`GET /api/accounts/refresh-logs/failed` 返回的是“当前仍处于失败状态的邮箱快照”，不再是历史失败日志列表。
+
+`GET /api/accounts/refresh-status-list` 查询参数：
+
+- `q`
+- `status=all|success|failed|never`
+- `page`
+- `page_size`
 
 ### 转发日志与触发
 
@@ -610,6 +1000,44 @@ curl -H "X-API-Key: your-api-key" \
 | `folder` | string | 否 | 当前邮件所在文件夹，默认 `inbox` |
 | `method` | string | 否 | 优先取详情的方式，常见为 `graph` |
 
+#### 返回字段
+
+`email` 对象至少包含以下字段：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | string | 邮件 ID |
+| `subject` | string | 邮件主题 |
+| `from` | string | 发件人 |
+| `to` | string | 收件人，多个地址用 `, ` 拼接 |
+| `cc` | string | 抄送，可能为空 |
+| `date` | string | 收件时间 |
+| `body` | string | 邮件正文 |
+| `body_type` | string | `html` 或 `text` |
+| `attachments` | array<object> | 附件列表 |
+
+`attachments` 中每个对象包含：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | string | 附件 ID，下载附件时使用 |
+| `name` | string | 附件文件名 |
+| `content_type` | string | MIME 类型 |
+| `size` | int | 附件大小，单位字节 |
+| `is_inline` | bool | 是否为内联附件 |
+| `content_id` | string | 内联附件的 Content-ID，没有时为空 |
+
+### GET `/api/email/<email>/<message_id>/attachments/<attachment_id>`
+
+下载单个邮件附件。返回文件流，并带 `Content-Disposition: attachment` 响应头。
+
+#### 查询参数
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `folder` | string | 否 | 当前邮件所在文件夹，默认 `inbox` |
+| `method` | string | 否 | Outlook 账号优先使用 `graph`，传 `imap` 时走 IMAP 下载 |
+
 ### POST `/api/emails/delete`
 
 批量删除邮件。
@@ -634,8 +1062,9 @@ curl -H "X-API-Key: your-api-key" \
 
 | 方法 | 路径 | 参数 | 说明 |
 | --- | --- | --- | --- |
-| GET | `/api/temp-emails` | 无 | 获取所有临时邮箱 |
+| GET | `/api/temp-emails` | 无 | 获取所有临时邮箱，列表项包含 `tags` 字段 |
 | POST | `/api/temp-emails/import` | JSON: `account_string`、`provider` | 批量导入临时邮箱 |
+| POST | `/api/temp-emails/batch-delete` | JSON: `temp_email_ids` | 批量删除临时邮箱 |
 | GET | `/api/duckmail/domains` | 无 | 获取 DuckMail 可用域名 |
 | GET | `/api/cloudflare/domains` | 无 | 获取 Cloudflare 可用域名 |
 
@@ -706,9 +1135,12 @@ curl -H "X-API-Key: your-api-key" \
 
 ```json
 {
-  "cron_expression": "0 */6 * * *"
+  "cron_expression": "0 */6 * * *",
+  "time_zone": "America/Los_Angeles"
 }
 ```
+
+可选字段 `time_zone` 用于按指定 IANA 时区预览下一次执行时间；未传时使用当前系统设置中的 `app_timezone`。
 
 ### GET `/api/settings`
 
@@ -725,6 +1157,7 @@ curl -H "X-API-Key: your-api-key" \
 | `cloudflare_worker_domain` | Cloudflare Worker 域名 |
 | `cloudflare_email_domains` | Cloudflare 邮箱域名列表，逗号分隔字符串 |
 | `cloudflare_admin_password` | Cloudflare 管理密码 |
+| `app_timezone` | 当前系统时区，IANA 时区名，例如 `Asia/Shanghai` |
 | `forward_channels` | 当前启用的转发渠道 |
 | `forward_check_interval_minutes` | 转发检查间隔 |
 | `forward_email_window_minutes` | 转发时间窗口 |
@@ -756,6 +1189,7 @@ curl -H "X-API-Key: your-api-key" \
 | `refresh_cron` | string | Cron 表达式 |
 | `use_cron_schedule` | bool | 是否使用 Cron 调度 |
 | `enable_scheduled_refresh` | bool | 是否开启定时刷新 |
+| `app_timezone` | string | 系统时区，使用 IANA 时区名，例如 `Asia/Shanghai` |
 | `external_api_key` | string | 对外 API Key，可传空字符串清空 |
 
 #### 临时邮箱服务相关字段
