@@ -1,328 +1,352 @@
-﻿# 澶氶偖绠遍偖浠剁鐞嗗伐鍏?
+# 多邮箱邮件管理工具
 
-涓€涓潰鍚戝閭璐﹀彿鍦烘櫙鐨勯偖浠剁鐞嗗伐鍏凤紝鏀寔閫氳繃 Outlook OAuth銆丮icrosoft Graph API 鍜屾爣鍑?IMAP 缁熶竴璇诲彇銆佺鐞嗗拰杞彂閭欢锛屽苟鎻愪緵 Web 鐣岄潰鐢ㄤ簬鍒嗙粍绠＄悊銆佽处鍙风鐞嗐€侀偖浠舵煡鐪嬪拰瀵瑰 API 璋冪敤銆傚綋鍓嶆敮鎸?Outlook銆丟mail銆丵Q銆?63銆?26銆乊ahoo銆侀樋閲岄偖绠变互鍙婅嚜瀹氫箟 IMAP 閭锛屽悓鏃堕泦鎴?GPTMail銆丏uckMail銆丆loudflare Temp Email 澶氭彁渚涘晢涓存椂閭鑳藉姏銆?
+一个面向多邮箱账号场景的邮件管理工具，支持通过 Outlook/Hotmail OAuth、Microsoft Graph API 和标准 IMAP 统一读取、管理和转发邮件，并提供 Web 界面用于分组管理、账号管理、邮件查看和对外 API 调用。当前支持 Outlook/Hotmail、Gmail、QQ、163、126、Yahoo、阿里邮箱以及自定义 IMAP 邮箱，同时集成 GPTMail、DuckMail、Cloudflare Temp Email 多提供商临时邮箱能力。
+## 📦 快速开始
+### 体验站点
+https://aso.de5.net
+admin123
+注意：体验站点请勿修改密码或存放实际数据，部署在无持久化的服务上，数据随时可能丢失恢复初始状态
 
-## 鉁?鍔熻兘鐗规€?
+## 🌿 版本管理与发布
 
-### 閭欢璇诲彇鏂瑰紡
+本项目采用轻量化双分支版本管理：
 
-鏈伐鍏峰綋鍓嶅寘鍚笁绫昏鍙栭摼璺細
+- `main`：稳定分支，只保留可发布版本
+- `dev`：开发分支，日常功能开发与修复默认在这里进行
 
-1. **Outlook OAuth + Graph API** - 浼樺厛鏂瑰紡锛岄€傚悎 Outlook / Hotmail / Live 璐﹀彿
-2. **Outlook OAuth + IMAP 鍥為€€** - `outlook.live.com` / `outlook.office365.com`
-3. **鏍囧噯 IMAP** - 閫傜敤浜?Gmail銆丵Q銆?63銆?26銆乊ahoo銆侀樋閲岄偖绠卞拰鑷畾涔?IMAP
+标准发版流程：
 
-### Web 搴旂敤鍔熻兘
+1. 在 `dev` 分支完成开发与验证
+2. 合并到 `main`
+3. 更新 `VERSION` 与 `CHANGELOG.md`
+4. 推送 `main`
+5. 手动触发 GitHub Actions 的 `Create GitHub Release` 工作流，并传入不带 `v` 的版本号，例如 `2.0.15`
 
-#### 鏍稿績鍔熻兘
-- 馃攼 **鐧诲綍楠岃瘉** - 瀵嗙爜淇濇姢鐨?Web 鐣岄潰锛屾敮鎸佸湪绾夸慨鏀瑰瘑鐮?
-- 馃搧 **鍒嗙粍绠＄悊** - 鏀寔鍒涘缓銆佺紪杈戙€佸垹闄ら偖绠卞垎缁勶紝鑷畾涔夊垎缁勯鑹诧紝鏀寔鍒嗙粍绾у埆浠ｇ悊璁剧疆
-- 馃寪 **鍒嗙粍浠ｇ悊** - 姣忎釜鍒嗙粍鍙厤缃?HTTP/SOCKS5 浠ｇ悊
-- 馃摟 **澶氶偖绠辩鐞?* - 鎵归噺瀵煎叆鍜岀鐞?Outlook OAuth / IMAP 閭璐﹀彿
-- 馃 **鍒悕绠＄悊** - 鏀寔缁欏崟涓偖绠遍厤缃涓埆鍚嶉偖绠憋紝涓婚偖绠卞拰鍒悕閮藉彲鐢ㄤ簬妫€绱㈤偖浠跺拰璋冪敤瀵瑰 API
-- 馃攢 **鍒悕楂樼骇鐢ㄦ硶** - 鍙皢澶栭儴閭鑷姩杞彂鍒版湰椤圭洰绠＄悊鐨勯偖绠?A锛屽啀鎶婂閮ㄩ偖绠遍厤缃负 A 鐨勫埆鍚嶏紝浠庤€岄€氳繃鏈」鐩粺涓€璇诲彇閭欢
-- 馃摤 **閭欢鏌ョ湅** - Web 鐣岄潰鏀寔鏌ョ湅鏀朵欢绠卞拰鍨冨溇閭欢锛汚PI 鏀寔 `inbox`銆乣junkemail`銆乣deleteditems`銆乣all`
-- 馃攳 **鍏ㄥ睆鏌ョ湅** - 鏀寔鍏ㄥ睆妯″紡鏌ョ湅閭欢
-- 馃摛 **瀵煎嚭鍔熻兘** - 鏀寔鎸夊垎缁勬垨鍏ㄩ儴瀵煎嚭閭璐﹀彿淇℃伅
-- 馃帹 **鐜颁唬鍖?UI** - 鍥涙爮甯冨眬锛岃处鍙峰垪琛ㄣ€侀偖浠跺垪琛ㄣ€侀偖浠惰鎯呭垎鍖烘竻鏅?
-- 鈿?**鎬ц兘浼樺寲** - 閭欢鍒楄〃涓庤处鍙峰垪琛ㄧ紦瀛橈紝鍒嗙粍鍒囨崲鍜岃处鍙峰垏鎹㈡洿蹇?
-- 馃搫 **鍒嗛〉鍔犺浇** - 婊氬姩鍒板簳閮ㄨ嚜鍔ㄥ姞杞戒笅涓€椤碉紙姣忛〉20灏侊級
-- 馃敟 **涓存椂閭** - 闆嗘垚 GPTMail + DuckMail + Cloudflare Temp Email锛屽鎻愪緵鍟嗙敓鎴愩€佸鍏ャ€佽鍙栧拰鏌ョ湅璇︽儏
-- 鈿欙笍 **绯荤粺璁剧疆** - 鍦ㄧ嚎淇敼瀵嗙爜銆丄PI Key 绛?
-- 馃攧 **OAuth2 鍔╂墜** - 鍐呯疆鎺堟潈娴佺▼锛屽揩閫熻幏鍙?Refresh Token
-- 馃捑 **閭欢缂撳瓨** - 鏅鸿兘缂撳瓨閭欢鍒楄〃锛屽垏鎹㈠嵆鏃跺睍绀?
-- 馃彿锔?**鏍囩绠＄悊** - 鏀寔缁欓偖绠辨墦鏍囩銆佹壒閲忔搷浣溿€佹寜鏍囩绛涢€?
-- 馃摝 **鎵归噺绉诲姩鍒嗙粍** - 鎵归噺閫夋嫨閭绉诲姩鍒版寚瀹氬垎缁?
-- 鉁?**鎵归噺閫夋嫨** - 閭鍒楄〃銆侀偖浠跺垪琛ㄥ潎鏀寔鍏ㄩ€夊綋鍓嶅垪琛ㄤ笌娓呯┖閫夋嫨
-- 馃棏锔?**閭欢鍒犻櫎** - 鍗曞皝/鎵归噺姘镐箙鍒犻櫎閭欢
-- 馃攧 **API 浼樺厛绾у洖閫€** - Graph API 鈫?IMAP(鏂? 鈫?IMAP(鏃? 鑷姩鍥為€€
-- 馃攽 **瀵瑰 API** - 閫氳繃 API Key 鐩存帴鑾峰彇閭欢锛屾棤闇€鐧诲綍锛屾敮鎸佸埆鍚嶉偖绠便€佽仛鍚堟枃浠跺す鍜屽鏉′欢绛涢€?
+手动发版工作流会自动：
 
-#### 閭欢杞彂
-- 馃摦 **鎸夎处鍙峰紑鍚浆鍙?* - 姣忎釜璐﹀彿鍗曠嫭鎺у埗鏄惁鍙備笌鑷姩杞彂
-- 馃摠 **澶氭笭閬撹浆鍙?* - 鏀寔 SMTP 閭欢杞彂鍜?Telegram 杞彂
-- 鈴憋笍 **鏃堕棿绐楀彛鎺у埗** - 鏀寔浠呰浆鍙戞渶杩?X 鍒嗛挓鍐呮敹鍒扮殑閭欢
-- 馃棏锔?**鍨冨溇绠辫浆鍙戝彲閫?* - 鍙厤缃槸鍚︽妸鍨冨溇閭欢涓€璧风撼鍏ヨ浆鍙?
-- 馃摎 **杞彂鍘嗗彶** - 鏀寔鏌ョ湅鏈€杩戣浆鍙戣褰曞拰澶辫触璁板綍
-- 鈻讹笍 **鎵嬪姩瑙﹀彂** - 鏀寔浠庣晫闈㈡墜鍔ㄨЕ鍙戜竴娆¤浆鍙戞鏌?
+- 构建 Windows `exe` 并打包为 Release 附件
+- 创建并推送对应标签，例如 `v2.0.15`
+- 根据 `CHANGELOG.md` 中对应版本条目生成 GitHub Release 正文
+- 构建并发布正式版本镜像 `ghcr.io/assast/outlookemail:v2.0.15`
 
-#### Token 鍒锋柊绠＄悊
-- 馃攣 **鍏ㄩ噺鍒锋柊** - 涓€閿埛鏂版墍鏈?Outlook OAuth 璐﹀彿 Token
-- 鈴?**瀹氭椂鍒锋柊** - 鏀寔鎸夊ぉ鏁版垨 Cron 琛ㄨ揪寮忛厤缃紝Docker / Docker Compose 鍚姩涔熶細鑷姩鐢熸晥
-- 馃搳 **鍒锋柊缁熻** - 瀹炴椂鏄剧ず澶辫触閭鏁伴噺
-- 馃摐 **鍒锋柊鍘嗗彶** - 杩戝崐骞村畬鏁磋褰?
+Docker 镜像标签约定：
 
-#### 瀹夊叏鐗规€?
-- 馃洝锔?XSS 闃叉姢 | 馃敀 CSRF 闃叉姢 | 馃攼 鏁版嵁鍔犲瘑 | 馃殾 閫熺巼闄愬埗 | 馃搵 瀹¤鏃ュ織 | 馃攽 浜屾楠岃瘉
+- `ghcr.io/assast/outlookemail:latest`：默认分支最近一次符合条件的稳定构建
+- `ghcr.io/assast/outlookemail:main`：`main` 分支最近一次符合条件的构建
+- `ghcr.io/assast/outlookemail:dev`：`dev` 分支最近一次符合条件的构建
+- `ghcr.io/assast/outlookemail:vX.Y.Z`：正式版本镜像
 
-### 鐣岄潰甯冨眬
+更完整的发版步骤、工作流行为和核对清单见 [发版说明](RELEASE.md)。
 
-Web 搴旂敤閲囩敤鍥涙爮寮忓竷灞€璁捐锛?
-1. **鍒嗙粍闈㈡澘** - 鏄剧ず鎵€鏈夐偖绠卞垎缁勶紝鐐瑰嚮鍒囨崲
-2. **閭闈㈡澘** - 鏄剧ず褰撳墠鍒嗙粍涓嬬殑閭璐﹀彿鍒楄〃
-3. **閭欢鍒楄〃** - 鏄剧ず閫変腑閭鐨勯偖浠讹紝鏀寔鍒囨崲鏂囦欢澶瑰拰婊氬姩鍔犺浇
-4. **閭欢璇︽儏** - 鏄剧ず閫変腑閭欢鐨勫畬鏁村唴瀹癸紙鏀寔 HTML 娓叉煋锛?
+### 方式一：下载 Windows `exe`(win可用)
 
-## 馃摳 鐣岄潰棰勮
+从 GitHub Releases 下载对应版本的 `OutlookEmail-windows-x64-*.zip`，解压后直接运行 `OutlookEmail.exe` 即可。
 
-### 閭鍒楄〃鐣岄潰
-![閭鍒楄〃](img/閭鍒楄〃.png)
+桌面版首次启动会自动：
 
-### 鍏ㄥ眬鎼滅储鍔熻兘
-![鍏ㄥ眬鎼滅储](img/鍏ㄥ眬鎼滅储.png)
+- 生成并持久化 `SECRET_KEY`
+- 创建本地数据目录和 SQLite 数据库
+- 启动 Web 服务，默认地址 `http://127.0.0.1:5000`
 
-### 瀵煎叆閭璐﹀彿
-![瀵煎叆閭璐﹀彿](img/瀵煎叆閭璐﹀彿.png)
+说明：
 
-### Token 鍒锋柊绠＄悊
-![鍏ㄩ噺鍒锋柊Token](img/鍏ㄩ噺鍒锋柊token.png)
+- Windows 数据默认保存在 `%APPDATA%\OutlookEmail`
+- 默认登录密码仍然是 `admin123`，首次登录后建议立即修改
 
-### 鏍囩绠＄悊鍔熻兘
-![鏍囩绠＄悊](img/鏍囩绠＄悊.png)
-
-## 馃摝 蹇€熷紑濮?
-
-## 馃尶 鐗堟湰绠＄悊涓庡彂甯?
-
-鏈」鐩噰鐢ㄨ交閲忓寲鍙屽垎鏀増鏈鐞嗭細
-
-- `main`锛氱ǔ瀹氬垎鏀紝鍙繚鐣欏彲鍙戝竷鐗堟湰
-- `dev`锛氬紑鍙戝垎鏀紝鏃ュ父鍔熻兘寮€鍙戜笌淇榛樿鍦ㄨ繖閲岃繘琛?
-
-鐗堟湰鍙烽伒寰涔夊寲鐗堟湰锛圫emantic Versioning锛夛細
-
-- `v1.0.0`锛氶涓ǔ瀹氭寮忕増
-- `v1.0.1`锛氬悜鍚庡吋瀹圭殑闂淇
-- `v1.1.0`锛氬悜鍚庡吋瀹圭殑鏂板姛鑳?
-- `v2.0.0`锛氬寘鍚笉鍏煎鍙樻洿鐨勫ぇ鐗堟湰
-
-浠撳簱涓殑鐗堟湰鐩稿叧鏂囦欢锛?
-
-- `VERSION`锛氬綋鍓嶄粨搴撳唴瀹氫箟鐨勭増鏈彿
-- `CHANGELOG.md`锛氱増鏈彉鏇磋褰?
-- Git Tag锛氭寮忓彂甯冩爣绛撅紝濡?`v1.0.0`
-
-鎺ㄨ崘鍙戝竷娴佺▼锛?
-
-1. 鍦?`dev` 鍒嗘敮瀹屾垚寮€鍙戜笌楠岃瘉
-2. 鍚堝苟鍒?`main`
-3. 鏇存柊 `VERSION` 涓?`CHANGELOG.md`
-4. 鍦?`main` 涓婃墦姝ｅ紡鏍囩锛屼緥濡?`v1.0.0`
-
-Docker 闀滃儚鏍囩绾﹀畾锛?
-
-- `ghcr.io/assast/outlookemail:latest`锛氶粯璁ょǔ瀹氱増锛堟潵鑷粯璁ゅ垎鏀級
-- `ghcr.io/assast/outlookemail:dev`锛氬紑鍙戝垎鏀渶鏂版瀯寤?
-- `ghcr.io/assast/outlookemail:v1.0.0`锛氭寮忕増鏈暅鍍?
-
-### 鏂瑰紡涓€锛氫娇鐢?Docker锛堟帹鑽愶級
+### 方式二：使用 Docker（推荐服务器部署）
 
 ```bash
-# 鎷夊彇鏈€鏂伴暅鍍?
+# 拉取最新镜像
 docker pull ghcr.io/assast/outlookemail:latest
 
-# 杩愯瀹瑰櫒
+# 运行容器
 docker run -d \
   --name outlook-mail-reader \
-  -p 17001:5000 \
+  -p 5000:5000 \
   -v $(pwd)/data:/app/data \
-  -e LOGIN_USERNAME=admin \
   -e LOGIN_PASSWORD=admin123 \
+  -e SECRET_KEY=your-secret-key-here \
   ghcr.io/assast/outlookemail:latest
 ```
 
-### 鏂瑰紡浜岋細浣跨敤 Python 鐩存帴杩愯
+### 方式三：使用 Python 直接运行
 
 ```bash
 git clone https://github.com/assast/outlookEmail.git
 cd outlookEmail
 pip install -r requirements.txt
+export SECRET_KEY=your-secret-key-here
 python web_outlook_app.py
 ```
 
-璁块棶 `http://localhost:5000`锛堟垨浣犳槧灏勭殑绔彛锛夊嵆鍙娇鐢ㄣ€?
+访问 `http://localhost:5000` 即可使用。
+如果是服务器部署，仍然建议显式设置固定 `SECRET_KEY`。
 
-### 浣跨敤 Docker Compose
+### 使用 Docker Compose
+
+```yaml
+version: '3.8'
+services:
+  outlook-mail-reader:
+    image: ghcr.io/assast/outlookemail:latest
+    container_name: outlook-mail-reader
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - LOGIN_PASSWORD=admin123
+      - SECRET_KEY=your-secret-key-here
+      - FLASK_ENV=production
+    restart: unless-stopped
+```
 
 ```bash
-# 1) 鍑嗗鐜鍙橀噺鏂囦欢
-cp .env.example .env
-
-# 2) 鎸夐渶淇敼 .env锛堜緥濡傜鍙ｅ拰鐧诲綍璐﹀彿锛?
-# PORT=5000
-# HOST_PORT=17001
-# LOGIN_USERNAME=admin
-# LOGIN_PASSWORD=浣犵殑寮哄瘑鐮?
-# SECRET_KEY 鍙暀绌猴細棣栨鍚姩浼氳嚜鍔ㄧ敓鎴愬苟鍐欏叆 data/secret_key
-
-# 3) 浣跨敤浠撳簱鍐呯疆鐨?docker-compose.yml 鍚姩
-docker compose up -d --build
+docker-compose up -d
 ```
 
-## 馃摉 浣跨敤璇存槑
+## ✨ 功能特性
 
-### 1. 鑾峰彇 OAuth2 鍑瘉
+### 邮件读取方式
 
-瑕佷娇鐢ㄦ湰宸ュ叿锛屾偍闇€瑕佽幏鍙栦互涓?OAuth2 鍑瘉锛?
+本工具当前包含三类读取链路：
 
-1. **Client ID** - Microsoft Azure 搴旂敤娉ㄥ唽鐨勫鎴风 ID
-2. **Refresh Token** - OAuth2 鍒锋柊浠ょ墝
+1. **Outlook/Hotmail OAuth + Graph API** - 优先方式，适合 Outlook / Hotmail / Live 账号
+2. **Outlook/Hotmail OAuth + IMAP 回退** - `outlook.live.com` / `outlook.office365.com`
+3. **标准 IMAP** - 适用于 Gmail、QQ、163、126、Yahoo、阿里邮箱和自定义 IMAP
 
-#### 姝ラ 1锛氭敞鍐?Azure 搴旂敤
+### Web 应用功能
 
-璁块棶 [Azure Portal](https://portal.azure.com/)锛岃繘鍏ャ€屽簲鐢ㄦ敞鍐屻€嶏細
+#### 核心功能
+- 🔐 **登录验证** - 密码保护的 Web 界面，支持在线修改密码
+- 📁 **分组管理** - 支持创建、编辑、删除邮箱分组，自定义分组颜色，支持分组级别代理设置
+- 🌐 **分组代理** - 每个分组可配置 HTTP/SOCKS5 代理
+- 📧 **多邮箱管理** - 批量导入和管理 Outlook/Hotmail OAuth / IMAP 邮箱账号
+- 🪪 **别名管理** - 支持给单个邮箱配置多个别名邮箱，主邮箱和别名都可用于检索邮件和调用对外 API
+- 🔀 **别名高级用法** - 可将外部邮箱自动转发到本项目管理的邮箱 A，再把外部邮箱配置为 A 的别名，从而通过本项目统一读取邮件
+- 📬 **邮件查看** - Web 界面支持查看收件箱和垃圾邮件；API 支持 `inbox`、`junkemail`、`deleteditems`、`all`
+- 🔍 **全屏查看** - 支持全屏模式查看邮件
+- 📤 **导出功能** - 支持按分组或全部导出邮箱账号信息
+- 🎨 **现代化 UI** - 四栏布局，账号列表、邮件列表、邮件详情分区清晰
+- ⚡ **性能优化** - 邮件列表与账号列表缓存，分组切换和账号切换更快
+- 📄 **分页加载** - 滚动到底部自动加载下一页（每页20封）
+- 🔥 **临时邮箱** - 集成 GPTMail + DuckMail + Cloudflare Temp Email，多提供商生成、导入、读取和查看详情
+- ⚙️ **系统设置** - 在线修改密码、API Key 等
+- 🔄 **OAuth2 助手** - 内置授权流程，快速获取 Refresh Token
+- 💾 **邮件缓存** - 智能缓存邮件列表，切换即时展示
+- 🏷️ **标签管理** - 支持给邮箱打标签、批量操作、按标签筛选
+- 📦 **批量移动分组** - 批量选择邮箱移动到指定分组
+- ✅ **批量选择** - 邮箱列表、邮件列表均支持全选当前列表与清空选择
+- 🗑️ **邮件删除** - 单封/批量永久删除邮件
+- 🔄 **API 优先级回退** - Graph API → IMAP(新) → IMAP(旧) 自动回退
+- 🔑 **对外 API** - 通过 API Key 直接获取邮件，无需登录，支持别名邮箱、聚合文件夹和多条件筛选 带+号的附加电子邮箱自动识别，自动回退主邮箱/别名邮箱查询
 
-![搴旂敤娉ㄥ唽](img/搴旂敤娉ㄥ唽.png)
+#### 邮件转发
+- 📮 **按账号开启转发** - 每个账号单独控制是否参与自动转发
+- 📨 **多渠道转发** - 支持 SMTP 邮件转发和 Telegram 转发
+- ⏱️ **时间窗口控制** - 支持仅转发最近 X 分钟内收到的邮件
+- 🗑️ **垃圾箱转发可选** - 可配置是否把垃圾邮件一起纳入转发
+- 📚 **转发历史** - 支持查看最近转发记录和失败记录
+- ▶️ **手动触发** - 支持从界面手动触发一次转发检查
 
-#### 姝ラ 2锛氬垱寤烘柊搴旂敤
+#### Token 刷新管理
+- 🔁 **全量刷新** - 一键刷新所有 Outlook/Hotmail OAuth 账号 Token
+- ⏰ **定时刷新** - 支持按天数或 Cron 表达式配置，Docker / Docker Compose 启动也会自动生效
+- 📊 **刷新统计** - 实时显示失败邮箱数量
+- 📜 **刷新历史** - 近半年完整记录
 
-鐐瑰嚮銆屾柊娉ㄥ唽銆嶏紝濉啓搴旂敤淇℃伅锛?
+#### 安全特性
+- 🛡️ XSS 防护 | 🔒 CSRF 防护 | 🔐 数据加密 | 🚦 速率限制 | 📋 审计日志 | 🔑 二次验证
 
-![娉ㄥ唽搴旂敤绋嬪簭](img/娉ㄥ唽搴旂敤绋嬪簭.png)
+### 界面布局
 
-- **鍚嶇О**锛氳嚜瀹氫箟搴旂敤鍚嶇О
-- **鏀寔鐨勮处鎴风被鍨?*锛氶€夋嫨銆屼换浣曠粍缁囩洰褰曚腑鐨勮处鎴峰拰涓汉 Microsoft 璐︽埛銆?
-- **閲嶅畾鍚?URI**锛氶€夋嫨銆屽叕鍏卞鎴风/鏈満銆嶏紝濉啓 `http://localhost:8080`
+Web 应用采用四栏式布局设计：
+1. **分组面板** - 显示所有邮箱分组，点击切换
+2. **邮箱面板** - 显示当前分组下的邮箱账号列表
+3. **邮件列表** - 显示选中邮箱的邮件，支持切换文件夹和滚动加载
+4. **邮件详情** - 显示选中邮件的完整内容（支持 HTML 渲染）
 
-#### 姝ラ 3锛氳幏鍙栧簲鐢ㄧ▼搴?ID
+## 📸 界面预览
 
-鍒涘缓瀹屾垚鍚庯紝澶嶅埗銆屽簲鐢ㄧ▼搴?瀹㈡埛绔? ID銆嶏細
+### 邮箱列表界面
+![邮箱列表](img/邮箱列表.png)
 
-![鑾峰彇搴旂敤绋嬪簭ID](img/鑾峰彇搴旂敤绋嬪簭ID.png)
+### 全局搜索功能
+![全局搜索](img/全局搜索.png)
 
-#### 姝ラ 4锛氶厤缃?API 鏉冮檺  杩欎竴姝ュ簲璇ュ彲浠ョ渷鐣ワ紝鐩墠鍐呯疆鐨勫鎴风id灏辨病鏈夎缃繖涓€姝ヤ篃鑳芥甯镐娇鐢?
+### 导入邮箱账号
+![导入邮箱账号](img/导入邮箱账号.png)
 
-鍦ㄣ€孉PI 鏉冮檺銆嶄腑娣诲姞浠ヤ笅鏉冮檺锛?
-- `offline_access` - 鑾峰彇鍒锋柊浠ょ墝
-- `Mail.Read` - 璇诲彇閭欢
-- `Mail.ReadWrite` - 璇诲啓閭欢
-- `User.Read` - 璇诲彇鐢ㄦ埛淇℃伅
-- `IMAP.AccessAsUser.All` - IMAP 璁块棶
+### Token 刷新管理
+![全量刷新Token](img/全量刷新token.png)
 
-#### 姝ラ 5锛氳幏鍙?Refresh Token
+### 标签管理功能
+![标签管理](img/标签管理.png)
 
-浣跨敤鏈伐鍏峰唴缃殑 OAuth2 鍔╂墜鑾峰彇 Refresh Token锛?
+## 📖 使用说明
 
-![鎹㈠彇token](img/鎹㈠彇token.png)
+### 1. 获取 OAuth2 凭证（这一步非必须，买的账号如果是带令牌的可以跳过这一步）
 
-1. 鍦?Web 鐣岄潰鐐瑰嚮銆岃幏鍙?Token銆嶆寜閽?
-2. 鐐瑰嚮銆岀敓鎴愭巿鏉冮摼鎺ャ€?
-3. 澶嶅埗閾炬帴鍒版祻瑙堝櫒鎵撳紑锛屽畬鎴愭巿鏉?
-4. 澶嶅埗鎺堟潈鍚庣殑瀹屾暣 URL锛堝浜庡畨鍏ㄨ€冭檻锛屾垜娌℃湁缁熶竴寤鸿鎺堟潈鍥炶皟鏈嶅姟锛屾墍鏈夋巿鏉冮兘鍦ㄨ嚜宸遍儴缃茬殑鏈嶅姟鍐呭畬鎴愶紝涓嶄細澶栨硠锛屾墍浠ラ噸瀹氬悜URI涓篽ttp://localhost:8080锛岃繖涓摼鎺ヨ偗瀹氭槸鎵撲笉寮€鐨勶紝鎵€浠ヨ澶嶅埗杩囨潵鍦ㄩ儴缃茬殑鏈嶅姟璧板悗鍗婃鐨勬崲鍙朢efresh Token锛?
-5. 绮樿创鍒般€屾巿鏉冨悗鐨?URL銆嶈緭鍏ユ
-6. 鐐瑰嚮銆屾崲鍙?Token銆嶆寜閽?
-7. 澶嶅埗鑾峰緱鐨?Refresh Token
+要使用本工具，您需要获取以下 OAuth2 凭证：
 
-### 2. 瀵煎叆閭璐﹀彿
+1. **Client ID** - Microsoft Azure 应用注册的客户端 ID
+2. **Refresh Token** - OAuth2 刷新令牌
 
-鍦?Web 鐣岄潰涓偣鍑汇€屽鍏ラ偖绠便€嶅悗锛屽彲鏍规嵁閭绫诲瀷閫夋嫨瀵瑰簲瀵煎叆鏍煎紡銆?
+#### 步骤 1：注册 Azure 应用（这一步看目前的情况得E3 或者 E5 或者其他的开发者账号才能创建）
 
-#### Outlook OAuth
+访问 [Azure Portal](https://portal.azure.com/)，进入「应用注册」：
 
-鏀寔涓ょ鏍煎紡锛?
+![应用注册](img/应用注册.png)
+
+#### 步骤 2：创建新应用
+
+点击「新注册」，填写应用信息：
+
+![注册应用程序](img/注册应用程序.png)
+
+- **名称**：自定义应用名称
+- **支持的账户类型**：选择「任何组织目录中的账户和个人 Microsoft 账户」
+- **重定向 URI**：选择「公共客户端/本机」，填写 `http://localhost:8080`
+
+#### 步骤 3：获取应用程序 ID
+
+创建完成后，复制「应用程序(客户端) ID」：
+
+![获取应用程序ID](img/获取应用程序ID.png)
+
+#### 步骤 4：配置 API 权限  这一步应该可以省略，目前内置的客户端id就没有设置这一步也能正常使用
+
+在「API 权限」中添加以下权限：
+- `offline_access` - 获取刷新令牌
+- `Mail.Read` - 读取邮件
+- `Mail.ReadWrite` - 读写邮件
+- `User.Read` - 读取用户信息
+- `IMAP.AccessAsUser.All` - IMAP 访问
+
+#### 步骤 5：获取 Refresh Token
+
+使用本工具内置的 OAuth2 助手获取 Refresh Token：
+
+![换取token](img/换取token.png)
+
+1. 在 Web 界面点击「获取 Token」按钮
+2. 点击「生成授权链接」
+3. 复制链接到浏览器打开，完成授权
+4. 复制授权后的完整 URL（处于安全考虑，我没有统一建设授权回调服务，所有授权都在自己部署的服务内完成，不会外泄，所以重定向URI为http://localhost:8080，这个链接肯定是打不开的，所以要复制过来在部署的服务走后半段的换取Refresh Token）
+5. 粘贴到「授权后的 URL」输入框
+6. 点击「换取 Token」按钮
+7. 复制获得的 Refresh Token
+
+### 2. 导入邮箱账号
+
+在 Web 界面中点击「导入邮箱」后，可根据邮箱类型选择对应导入格式。
+
+#### Outlook/Hotmail OAuth
+
+支持两种格式：
 
 ```txt
-閭----瀵嗙爜----client_id----refresh_token
-閭----瀵嗙爜----refresh_token----client_id
+邮箱----密码----client_id----refresh_token
+邮箱----密码----refresh_token----client_id
 ```
 
-绀轰緥锛?
+示例：
 
 ```txt
 user@outlook.com----password123----24d9a0ed-8787-4584-883c-2fd79308940a----0.AXEA...
 ```
 
-#### 鏍囧噯 IMAP 閭
+#### 标准 IMAP 邮箱
 
-閫傜敤浜?Gmail銆丵Q銆?63銆?26銆乊ahoo銆侀樋閲岄偖绠辩瓑锛?
+适用于 Gmail、QQ、163、126、Yahoo、阿里邮箱等：
 
 ```txt
-閭----IMAP鎺堟潈鐮?搴旂敤瀵嗙爜
+邮箱----IMAP授权码/应用密码
 ```
 
-绀轰緥锛?
+示例：
 
 ```txt
 user@gmail.com----app-password
 user@qq.com----imap-auth-code
 ```
 
-#### 鑷畾涔?IMAP
+#### 自定义 IMAP
 
-鏀寔涓ょ鏍煎紡锛?
+支持两种格式：
 
 ```txt
-閭----IMAP瀵嗙爜
-閭----IMAP瀵嗙爜----imap_host----imap_port
+邮箱----IMAP密码
+邮箱----IMAP密码----imap_host----imap_port
 ```
 
-绀轰緥锛?
+示例：
 
 ```txt
 user@example.com----app-password
 user@example.com----app-password----imap.example.com----993
 ```
 
-鏀寔鎵归噺瀵煎叆锛屾瘡琛屼竴涓处鍙枫€傚鍏ユ椂鍙€夋嫨鏄惁绔嬪嵆寮€鍚偖浠惰浆鍙戙€傛櫘閫氶偖绠卞鍏ユ椂涓嶈兘閫夋嫨涓存椂閭鍒嗙粍銆?
+支持批量导入，每行一个账号。导入时可选择是否立即开启邮件转发。普通邮箱导入时不能选择临时邮箱分组。
 
-### 3. 鏌ョ湅閭欢
+### 3. 查看邮件
 
-1. 浠庡乏渚ч€夋嫨鍒嗙粍
-2. 閫夋嫨閭璐﹀彿
-3. 鐐瑰嚮銆岃幏鍙栭偖浠躲€嶆寜閽?
-4. 鍦?Web 鐣岄潰鍒囨崲銆屾敹浠剁銆嶃€屽瀮鍦鹃偖浠躲€嶆煡鐪嬮偖浠?
-5. 婊氬姩鍒伴偖浠跺垪琛ㄥ簳閮ㄨ嚜鍔ㄥ姞杞戒笅涓€椤碉紙姣忛〉 20 灏侊級
-6. 鐐瑰嚮閭欢鏌ョ湅璇︽儏锛屾敮鎸?HTML 娓叉煋涓庡叏灞忔煡鐪?
-7. 闇€瑕佹煡鐪?`deleteditems` 鎴?`all` 鑱氬悎缁撴灉鏃讹紝寤鸿浣跨敤瀵瑰 API 鎴栧唴閮?API
+1. 从左侧选择分组
+2. 选择邮箱账号
+3. 点击「获取邮件」按钮
+4. 在 Web 界面切换「收件箱」「垃圾邮件」查看邮件
+5. 滚动到邮件列表底部自动加载下一页（每页 20 封）
+6. 点击邮件查看详情，支持 HTML 渲染与全屏查看
+7. 需要查看 `deleteditems` 或 `all` 聚合结果时，建议使用对外 API 或内部 API
 
-### 4. 鍒悕绠＄悊
+### 4. 别名管理
 
-1. 鎵撳紑鏌愪釜閭璐﹀彿鐨勩€岀紪杈戣处鍙枫€?
-2. 鍦ㄣ€屽埆鍚嶉偖绠便€嶄腑鎸夎濉啓澶氫釜鍒悕
-3. 淇濆瓨鍚庯紝涓婚偖绠卞拰鍒悕閮戒細鎸囧悜鍚屼竴涓处鍙?
+1. 打开某个邮箱账号的「编辑账号」
+2. 在「别名邮箱」中按行填写多个别名
+3. 保存后，主邮箱和别名都会指向同一个账号
 
-閫傚悎杩欎簺鍦烘櫙锛?
+适合这些场景：
 
-- 鍚屼竴璐﹀彿鏈夊涓敞鍐岄偖绠卞悕绉?
-- 鏌愪簺绔欑偣浣跨敤浜?`user+tag@example.com`
-- 澶栭儴閭鑷姩杞彂鍒版湰椤圭洰绠＄悊閭鍚庯紝甯屾湜缁х画鐢ㄥ師閭鍚嶆潵鍙栦俊
+- 同一账号有多个注册邮箱名称
+- 某些站点使用了 `user+tag@example.com`
+- 外部邮箱自动转发到本项目管理邮箱后，希望继续用原邮箱名来取信
 
-### 5. 閭欢杞彂
+### 5. 邮件转发
 
-閭欢杞彂鍒嗘垚涓ゅ眰鎺у埗锛?
+邮件转发分成两层控制：
 
-1. **璐﹀彿绾у紑鍏?*
-   鍦ㄥ鍏ヨ处鍙锋垨缂栬緫璐﹀彿鏃讹紝閫夋嫨鏄惁涓鸿璐﹀彿寮€鍚浆鍙?
-2. **鍏ㄥ眬杞彂璁剧疆**
-   鍦ㄣ€岃缃?-> 閭欢杞彂璁剧疆銆嶄腑閰嶇疆锛?
-   - 杞闂撮殧
-   - 杞彂閭欢鏃堕棿鑼冨洿
-   - 鏄惁杞彂鍨冨溇绠遍偖浠?
-   - 杞彂娓犻亾锛圫MTP / Telegram锛?
-   - SMTP / Telegram 鐨勫叿浣撳弬鏁?
+1. **账号级开关**
+   在导入账号或编辑账号时，选择是否为该账号开启转发
+2. **全局转发设置**
+   在「设置 -> 邮件转发设置」中配置：
+   - 轮询间隔
+   - 转发邮件时间范围
+   - 是否转发垃圾箱邮件
+   - 转发渠道（SMTP / Telegram）
+   - SMTP / Telegram 的具体参数
 
-琛ュ厖璇存槑锛?
+补充说明：
 
-- 杞彂杞鍙鐞嗏€滆处鍙烽噷宸插紑鍚浆鍙戔€濈殑閭
-- 鍙互鎵嬪姩瑙﹀彂涓€娆¤浆鍙戞鏌?
-- 鍙互鏌ョ湅鏈€杩戣浆鍙戝巻鍙插拰澶辫触璁板綍
+- 转发轮询只处理“账号里已开启转发”的邮箱
+- 可以手动触发一次转发检查
+- 可以查看最近转发历史和失败记录
 
-### 6. 瀵瑰 API
+### 6. 对外 API
 
-閫氳繃 API Key 鐩存帴鑾峰彇閭欢锛屾棤闇€鐧诲綍 Web 鐣岄潰銆?
+通过 API Key 直接获取邮件，无需登录 Web 界面。
 
-褰撳墠棰濆鏀寔锛?
+当前额外支持：
 
-- 浣跨敤涓婚偖绠辨垨鍒悕閭鍙栦俊
-- `folder=all` 涓€娆¤仛鍚堟敹浠剁鍜屽瀮鍦鹃偖浠跺苟鎸夋椂闂存帓搴忥紝`top` 鎸夋瘡涓枃浠跺す鍒嗗埆璁＄畻
-- 鏀寔鎸変富棰樸€佸彂浠朵汉銆佸叧閿瘝绛涢€夊垪琛?
-- 鏀寔鐗规畩瀛楃鍒悕锛屼緥濡?`user+alias@example.com`
-- 榛樿 `top=1`
+- 使用主邮箱或别名邮箱取信
+- `folder=all` 一次聚合收件箱和垃圾邮件并按标准化后的邮件时间倒序排序，`top` 按每个文件夹分别计算
+- 支持按主题、发件人、关键词筛选列表
+- 支持特殊字符别名，例如 `user+alias@example.com`
+- 默认 `top=1`
 
-**閰嶇疆姝ラ锛?*
-1. 鐐瑰嚮銆屸殭锔?璁剧疆銆嶁啋 鍦ㄣ€屽澶?API Key銆嶅鐐瑰嚮銆岎煍?闅忔満鐢熸垚銆嶁啋 淇濆瓨
+**配置步骤：**
+1. 点击「⚙️ 设置」→ 在「对外 API Key」处点击「🔑 随机生成」→ 保存
 
-**璋冪敤绀轰緥锛?*
+**调用示例：**
 ```bash
 curl -H "X-API-Key: your-api-key" \
   "http://localhost:5000/api/external/emails?email=user@outlook.com&folder=inbox"
@@ -337,71 +361,94 @@ curl -H "X-API-Key: your-api-key" \
   "http://localhost:5000/api/external/emails?email=user%2Balias%40example.com"
 ```
 
-濡傛灉閭鎴栧埆鍚嶉噷甯︾壒娈婂瓧绗︼細
+如果邮箱或别名里带特殊字符：
 
-- `@` 鍙互鐩存帴浼?
-- `+` 寤鸿缂栫爜鎴?`%2B`
-- `&` 蹇呴』缂栫爜鎴?`%26`
+- `@` 可以直接传
+- `+` 建议编码成 `%2B`
+- `&` 必须编码成 `%26`
 
-濡傛灉浣犳妸澶栭儴閭 B 鑷姩杞彂鍒版湰椤圭洰绠＄悊鐨勯偖绠?A锛屽啀鎶?B 閰嶆垚 A 鐨勫埆鍚嶏紝閭ｄ箞鍚庣画鍙互鐩存帴鐢?B 浣滀负 `email` 鍙傛暟璋冪敤瀵瑰 API銆?
+如果你把外部邮箱 B 自动转发到本项目管理的邮箱 A，再把 B 配成 A 的别名，那么后续可以直接用 B 作为 `email` 参数调用对外 API。
 
-璇︾粏鏂囨。瑙?[API 鏂囨。](docs/api.md)銆?
+详细文档见 [API 文档](docs/api.md)。
 
-## 馃摎 璇︾粏鏂囨。
+## 📚 详细文档
 
-| 鏂囨。 | 璇存槑 |
+| 文档 | 说明 |
 |------|------|
-| [馃殌 閮ㄧ讲鎸囧崡](docs/deployment.md) | Docker銆丏ocker Compose銆丯ginx/Caddy 閮ㄧ讲銆佺幆澧冨彉閲忛厤缃?|
-| [馃攼 瀹夊叏閰嶇疆](docs/security.md) | XSS/CSRF 闃叉姢銆佹暟鎹姞瀵嗐€侀€熺巼闄愬埗銆佸璁℃棩蹇?|
-| [馃摗 API 鏂囨。](docs/api.md) | 瀵瑰 API銆佸唴閮?API 绔偣銆佷唬鐞嗛厤缃?|
-| [馃洜锔?鏁呴殰鎺掓煡](docs/troubleshooting.md) | 甯歌闂銆佹晠闅滄帓鏌ユ楠?|
-| [馃搵 鏇存柊鏃ュ織](CHANGELOG.md) | 鐗堟湰鏇存柊鍘嗗彶 |
-| [馃殺 鍙戠増璇存槑](RELEASE.md) | 鏍囧噯鍙戠増姝ラ銆佺増鏈彿瑙勫垯銆丟itHub Release 璇存槑 |
-| [馃洝锔?鍒嗘敮淇濇姢寤鸿](BRANCH_PROTECTION.md) | main/dev 浣跨敤杈圭晫銆佷繚鎶よ鍒欎笌鏋勫缓瑙﹀彂寤鸿 |
+| [🚀 部署指南](docs/deployment.md) | Docker、Docker Compose、Nginx/Caddy 部署、环境变量配置 |
+| [⬆️ 升级指南](docs/upgrade.md) | Windows、Docker、Python 直跑升级与回滚建议 |
+| [🔐 安全配置](docs/security.md) | XSS/CSRF 防护、数据加密、速率限制、审计日志 |
+| [📡 API 文档](docs/api.md) | 对外 API、内部 API 端点、代理配置 |
+| [🛠️ 故障排查](docs/troubleshooting.md) | 常见问题、故障排查步骤 |
+| [📋 更新日志](CHANGELOG.md) | 版本更新历史 |
+| [🚢 发版说明](RELEASE.md) | 标准发版步骤、版本号规则、GitHub Release 说明 |
+| [🛡️ 分支保护建议](BRANCH_PROTECTION.md) | main/dev 使用边界、保护规则与构建触发建议 |
 
-## 馃彈锔?鎶€鏈灦鏋?
+## 🏗️ 技术架构
 
-### 鍚庣鎶€鏈爤
-- **Flask 3.0+** - Web 妗嗘灦
-- **SQLite 3** - 鏁版嵁搴?
-- **Requests / requests[socks]** - HTTP 瀹㈡埛绔笌浠ｇ悊鏀寔
-- **IMAP4_SSL** - IMAP 鍗忚鏀寔
-- **Microsoft Graph API** - Outlook 閭欢 API
-- **APScheduler + croniter** - 瀹氭椂鍒锋柊涓庤浆鍙戣疆璇?
-- **bcrypt + cryptography** - 瀵嗙爜鍝堝笇涓庢晱鎰熷瓧娈靛姞瀵?
+### 后端技术栈
+- **Flask 3.0+** - Web 框架
+- **SQLite 3** - 数据库
+- **Requests / requests[socks]** - HTTP 客户端与代理支持
+- **IMAP4_SSL** - IMAP 协议支持
+- **Microsoft Graph API** - Outlook/Hotmail 邮件 API
+- **APScheduler + croniter** - 定时刷新与转发轮询
+- **bcrypt + cryptography** - 密码哈希与敏感字段加密
 
-### 鍓嶇鎶€鏈爤
-- **鍘熺敓 JavaScript** - 鏃犳鏋朵緷璧?
-- **CSS3** - 鐜颁唬鍖栨牱寮?
-- **Fetch API** - 寮傛璇锋眰
-- **DOMPurify 3.0.8** - HTML 鍑€鍖?
+### 前端技术栈
+- **原生 JavaScript** - 无框架依赖
+- **CSS3** - 现代化样式
+- **Fetch API** - 异步请求
+- **DOMPurify 3.0.8** - HTML 净化
 
-### 绯荤粺瑕佹眰
+### 系统要求
 - Python 3.9+
 - SQLite 3
-- Docker锛堝彲閫夛級
-- 2GB+ 鍐呭瓨
+- Docker（可选）
+- 2GB+ 内存
 
-## 馃摑 渚濊禆璇存槑
+## 📝 依赖说明
 
 ```txt
 flask>=3.0.0
-flask-wtf>=1.2.0          # CSRF 闃叉姢锛堟帹鑽愬畨瑁咃級
+flask-wtf>=1.2.0          # CSRF 防护（推荐安装）
 werkzeug>=3.0.0
-requests[socks]>=2.25.0   # HTTP 璇锋眰涓庝唬鐞嗘敮鎸?
-APScheduler>=3.10.0       # 瀹氭椂浠诲姟
-croniter>=1.3.0           # Cron 琛ㄨ揪寮忚В鏋?
-bcrypt>=4.0.0             # 瀵嗙爜鍝堝笇
-cryptography>=41.0.0      # 鏁版嵁鍔犲瘑
+requests[socks]>=2.25.0   # HTTP 请求与代理支持
+APScheduler>=3.10.0       # 定时任务
+croniter>=1.3.0           # Cron 表达式解析
+bcrypt>=4.0.0             # 密码哈希
+cryptography>=41.0.0      # 数据加密
 ```
-## 甯歌闂
-### Gmail鎬庝箞鑾峰彇搴旂敤瀵嗙爜
-寮€鍚簩楠岋紝鐒跺悗鍦ㄨ繖閲屽垱寤哄簲鐢ㄥ瘑鐮?
+## 常见问题
+### Gmail怎么获取应用密码
+开启2fa，然后在这里创建应用密码
+
 https://support.google.com/mail/answer/185833?hl=zh-Hans
 
-## 馃 璐＄尞
 
-娆㈣繋鎻愪氦 Issue 鍜?Pull Request锛?
+### 怎么获取tg的群组id 和 用户id
+#### 获取个人 ID (User ID)
+在 Telegram 搜索框搜索 @userinfobot 或 @getmyid_bot。
+
+点击 Start。
+
+机器人会立即回复你的 User ID（一串数字）。
+
+如果你想知道别人的 ID：只需将对方发给你的消息转发给这个机器人，它就会显示该用户的 ID。
+
+
+#### 获取群组 ID (Group ID)
+将上述机器人（如 @getmyid_bot）拉进你的群组。
+
+在群组里输入 /myid（或者机器人指定的指令）。
+
+机器人会返回该群组的 ID。
+
+注意： 普通群组 ID 通常以数字开头，而**超级群组（Supergroup）或频道（Channel）**的 ID 通常以 -100 开头。
+
+## 🤝 贡献
+
+欢迎提交 Issue 和 Pull Request！
 
 ```bash
 git clone https://github.com/assast/outlookEmail.git
@@ -412,22 +459,28 @@ pip install -r requirements.txt
 python web_outlook_app.py
 ```
 
-## 馃搫 璁稿彲璇?
+## 📄 许可证
 
-MIT License - 璇﹁ [LICENSE](LICENSE)
+MIT License - 详见 [LICENSE](LICENSE)
 
-## 馃檹 鑷磋阿
-鏈」鐩凡鍦?[LINUX DO 绀惧尯](https://linux.do/) 鍙戝竷锛屾劅璋㈢ぞ鍖虹殑鏀寔涓庡弽棣堛€?
+## 🙏 致谢
+本项目已在 [LINUX DO 社区](https://linux.do/) 发布，感谢社区的支持与反馈。
 
 - [Microsoft Graph API](https://docs.microsoft.com/graph/)
 - [GPTMail](https://mail.chatgpt.org.uk)
 - [Flask](https://flask.palletsprojects.com/)
 
+## ⭐ Star History
 
+[![Star History Chart](https://api.star-history.com/svg?repos=assast/outlookEmail&type=Date)](https://star-history.com/#assast/outlookEmail&Date)
 
 ---
 
-**猸?濡傛灉杩欎釜椤圭洰瀵逛綘鏈夊府鍔╋紝璇风粰涓?Star 鏀寔涓€涓嬶紒浣犵殑 Star 鏄垜鎸佺画鏇存柊鐨勫姩鍔涳紒** 猸?
+**⭐ 如果这个项目对你有帮助，请给个 Star 支持一下！你的 Star 是我持续更新的动力！** ⭐
 
+初次维护一个项目，2026年04月11日15:45:33才发现有几个pull没合并，非常抱歉，这是我的联系方式如果我没看到的话，可以提醒我一下，有好的建议也可以提，感谢~
+邮箱：u3794336@outlook.com
 
-
+## 免责声明
+本项目仅供学习、研究和技术交流使用，请遵守相关平台和服务条款，不要用于违规、滥用或非法用途。
+因使用本项目产生的任何风险和后果，由使用者自行承担。
