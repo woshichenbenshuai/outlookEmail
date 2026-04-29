@@ -510,8 +510,11 @@ TEMP_EMAIL_GROUP_ID = -1
 export_verify_tokens = {}
 
 # OAuth 配置
-OAUTH_CLIENT_ID = os.getenv("OAUTH_CLIENT_ID", "6daa9f56-5e67-4cb6-ae52-ef89ef912d36")
-OAUTH_REDIRECT_URI = os.getenv("OAUTH_REDIRECT_URI", "http://localhost:8080")
+# NOTE:
+# docker-compose may inject empty env values; treat empty strings as "unset"
+# so runtime defaults still apply.
+OAUTH_CLIENT_ID = (os.getenv("OAUTH_CLIENT_ID", "") or "").strip() or "6daa9f56-5e67-4cb6-ae52-ef89ef912d36"
+OAUTH_REDIRECT_URI = (os.getenv("OAUTH_REDIRECT_URI", "") or "").strip() or "http://localhost:8080"
 OAUTH_SCOPES = [
     "offline_access",
     "https://graph.microsoft.com/Mail.Read",
