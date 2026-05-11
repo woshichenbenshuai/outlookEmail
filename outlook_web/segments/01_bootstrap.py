@@ -75,6 +75,7 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 scheduler_instance = None
 scheduler_lock = threading.Lock()
 token_refresh_run_lock = threading.Lock()
+webdav_backup_run_lock = threading.Lock()
 proxy_socket_lock = threading.RLock()
 
 
@@ -1534,6 +1535,14 @@ def init_db():
         INSERT OR IGNORE INTO settings (key, value)
         VALUES ('show_account_created_at', 'true')
     ''')
+    cursor.execute('''
+        INSERT OR IGNORE INTO settings (key, value)
+        VALUES ('show_account_sort_order', 'false')
+    ''')
+    cursor.execute('''
+        INSERT OR IGNORE INTO settings (key, value)
+        VALUES ('show_group_id', 'true')
+    ''')
 
     cursor.execute('''
         INSERT OR IGNORE INTO settings (key, value)
@@ -1607,6 +1616,42 @@ def init_db():
         INSERT OR IGNORE INTO settings (key, value)
         VALUES ('wecom_webhook_url', '')
     ''')
+    cursor.execute('''
+        INSERT OR IGNORE INTO settings (key, value)
+        VALUES ('webdav_backup_enabled', 'false')
+    ''')
+    cursor.execute('''
+        INSERT OR IGNORE INTO settings (key, value)
+        VALUES ('webdav_backup_url', '')
+    ''')
+    cursor.execute('''
+        INSERT OR IGNORE INTO settings (key, value)
+        VALUES ('webdav_backup_username', '')
+    ''')
+    cursor.execute('''
+        INSERT OR IGNORE INTO settings (key, value)
+        VALUES ('webdav_backup_password', '')
+    ''')
+    cursor.execute('''
+        INSERT OR IGNORE INTO settings (key, value)
+        VALUES ('webdav_backup_cron', '0 3 * * *')
+    ''')
+    cursor.execute('''
+        INSERT OR IGNORE INTO settings (key, value)
+        VALUES ('webdav_backup_last_run_at', '')
+    ''')
+    cursor.execute('''
+        INSERT OR IGNORE INTO settings (key, value)
+        VALUES ('webdav_backup_last_status', '')
+    ''')
+    cursor.execute('''
+        INSERT OR IGNORE INTO settings (key, value)
+        VALUES ('webdav_backup_last_message', '')
+    ''')
+    cursor.execute('''
+        INSERT OR IGNORE INTO settings (key, value)
+        VALUES ('webdav_backup_last_filename', '')
+    ''')
 
     # 创建索引以优化查询性能
     cursor.execute('''
@@ -1627,6 +1672,26 @@ def init_db():
     cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_accounts_sort_order
         ON accounts(sort_order)
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_accounts_group_created
+        ON accounts(group_id, created_at)
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_accounts_group_sort_order
+        ON accounts(group_id, sort_order)
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_accounts_group_email
+        ON accounts(group_id, email)
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_accounts_group_email_nocase
+        ON accounts(group_id, email COLLATE NOCASE)
     ''')
 
     cursor.execute('''
@@ -1902,6 +1967,14 @@ def get_login_password() -> str:
 def get_login_username() -> str:
     username = (get_setting('login_username') or '').strip()
     return username if username else LOGIN_USERNAME
+
+
+def verify_login_password(password: str) -> bool:
+    """校验当前登录密码。"""
+    stored_password = get_login_password()
+    if is_password_hashed(stored_password):
+        return verify_password(password or '', stored_password)
+    return secrets.compare_digest(str(password or ''), str(stored_password or ''))
 
 
 def get_gptmail_api_key() -> str:

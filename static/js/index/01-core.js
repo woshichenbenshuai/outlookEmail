@@ -1,4 +1,4 @@
-        /* global closeAllModals, debounce, ensureForwardingSettingsUI, handleGlobalGroupPointerMove, handleGlobalGroupPointerUp, initColorPicker, initEmailListScroll, loadGroups, loadTags, renderEmailList, scheduleEmailListLoadCheck, searchAccounts */
+        /* global closeAllModals, debounce, ensureForwardingSettingsUI, handleGlobalGroupPointerMove, handleGlobalGroupPointerUp, initAccountListScroll, initAccountPageSizeSelect, initColorPicker, initEmailListScroll, loadGroups, loadTags, renderEmailList, scheduleEmailListLoadCheck, searchAccounts */
 
         // 全局状态
         let csrfToken = null;
@@ -11,6 +11,18 @@
         let groups = [];
         let accountsCache = {}; // 缓存各分组的邮箱列表
         let currentAccountListSource = []; // 当前账号列表的原始数据源（分组或搜索结果）
+        const ACCOUNT_LIST_DEFAULT_PAGE_SIZE = 200;
+        const ACCOUNT_LIST_MAX_PAGE_SIZE = 10000;
+        let accountListPageSize = ACCOUNT_LIST_DEFAULT_PAGE_SIZE;
+        let accountPaginationState = {
+            mode: '',
+            key: '',
+            total: 0,
+            loaded: 0,
+            hasMore: false,
+            loading: false
+        };
+        let accountListRequestSeq = 0;
         let currentForwardingLogAccountId = null;
         let currentForwardingLogAccountEmail = '';
         let editingGroupId = null;
@@ -40,6 +52,7 @@
         const BULK_REFRESH_MAX_TIMEOUT_MS = 180000;
         const REFRESH_STREAM_STALL_TIMEOUT_MS = 70000;
         const VERSION_STATUS_REQUEST_TIMEOUT_MS = 12000;
+        const DOCKER_UPDATE_REQUEST_TIMEOUT_MS = 20000;
         const DEFAULT_APP_TIME_ZONE = 'Asia/Shanghai';
         const FALLBACK_APP_TIME_ZONES = [
             'Asia/Shanghai',
@@ -51,9 +64,14 @@
             'America/New_York',
         ];
         let versionStatusRequest = null;
+        let dockerUpdateStatusRequest = null;
+        let currentVersionStatusState = 'unknown';
+        let dockerUpdateStatus = null;
         let emailListLoadCheckTimer = null;
         let appTimeZone = DEFAULT_APP_TIME_ZONE;
         let showAccountCreatedAt = true;
+        let showAccountSortOrder = false;
+        let showGroupId = true;
 
         function isUntaggedTagFilterValue(value) {
             return String(value || '').trim() === UNTAGGED_TAG_FILTER_KEY;
@@ -128,6 +146,24 @@
 
         function shouldShowAccountCreatedAt() {
             return showAccountCreatedAt !== false;
+        }
+
+        function setShowAccountSortOrder(enabled) {
+            showAccountSortOrder = enabled !== false;
+            return showAccountSortOrder;
+        }
+
+        function shouldShowAccountSortOrder() {
+            return showAccountSortOrder !== false;
+        }
+
+        function setShowGroupId(enabled) {
+            showGroupId = enabled !== false;
+            return showGroupId;
+        }
+
+        function shouldShowGroupId() {
+            return showGroupId !== false;
         }
 
         function parseDateInput(dateInput) {
@@ -505,6 +541,9 @@
         }
 
         function formatGroupIdBadgeText(groupId) {
+            if (!shouldShowGroupId()) {
+                return '';
+            }
             const normalizedId = Number.parseInt(String(groupId ?? ''), 10);
             return Number.isFinite(normalizedId) ? String(normalizedId) : '';
         }
@@ -646,15 +685,130 @@
             }
         }
 
+        function refreshDockerUpdateButton() {
+            const updateButton = document.getElementById('appVersionDockerUpdateBtn');
+            if (!updateButton) return;
+
+            const enabled = dockerUpdateStatus?.enabled === true;
+            const available = dockerUpdateStatus?.available === true;
+            const running = dockerUpdateStatus?.state?.running === true;
+            const updateAvailable = currentVersionStatusState === 'update_available';
+            const defaultLabel = updateButton.dataset.defaultLabel || 'Docker 更新';
+            const unavailableLabel = updateButton.dataset.unavailableLabel || '不可在线更新';
+
+            updateButton.hidden = !(enabled && updateAvailable);
+            updateButton.disabled = !available || running;
+            updateButton.textContent = running ? '更新中...' : (available ? defaultLabel : unavailableLabel);
+            updateButton.title = available
+                ? '启动 Docker 在线更新'
+                : (dockerUpdateStatus?.reason || 'Docker 更新不可用');
+        }
+
+        async function loadDockerUpdateStatus(forceRefresh = false) {
+            if (dockerUpdateStatusRequest && !forceRefresh) {
+                return dockerUpdateStatusRequest;
+            }
+
+            dockerUpdateStatusRequest = fetchWithTimeout('/api/docker-update/status', {
+                timeoutMs: DOCKER_UPDATE_REQUEST_TIMEOUT_MS,
+                timeoutMessage: 'Docker 更新状态获取超时',
+                cache: 'no-store',
+                credentials: 'same-origin'
+            })
+                .then(async (response) => {
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok || !payload.success || !payload.docker_update) {
+                        throw new Error(payload.error || 'Docker 更新状态获取失败');
+                    }
+                    dockerUpdateStatus = payload.docker_update;
+                    refreshDockerUpdateButton();
+                    return dockerUpdateStatus;
+                })
+                .catch(() => {
+                    dockerUpdateStatus = { enabled: false, available: false };
+                    refreshDockerUpdateButton();
+                    return dockerUpdateStatus;
+                })
+                .finally(() => {
+                    dockerUpdateStatusRequest = null;
+                });
+
+            return dockerUpdateStatusRequest;
+        }
+
+        async function monitorDockerUpdateResult(attempt = 0) {
+            const status = await loadDockerUpdateStatus(true);
+            const state = status?.state || {};
+
+            if (state.running) {
+                if (attempt < 20) {
+                    window.setTimeout(() => monitorDockerUpdateResult(attempt + 1), 2000);
+                }
+                return;
+            }
+
+            if (state.success === null || typeof state.success === 'undefined') {
+                showToast(
+                    state.message || '服务可能已重启，请刷新并核对当前版本/镜像',
+                    'warning'
+                );
+                return;
+            }
+
+            if (state.success === false) {
+                showToast(state.error || state.message || 'Docker 更新未完成', 'error');
+                return;
+            }
+
+            if (state.success === true) {
+                showToast(state.message || 'Docker 更新已完成', 'success');
+            }
+        }
+
+        async function startDockerUpdate() {
+            const updateButton = document.getElementById('appVersionDockerUpdateBtn');
+            if (updateButton?.disabled) return;
+
+            const confirmed = window.confirm('将启动 Docker 在线更新，容器可能会自动重启。确认继续？');
+            if (!confirmed) return;
+
+            updateButton.disabled = true;
+            updateButton.textContent = '更新中...';
+
+            try {
+                const response = await fetchWithTimeout('/api/docker-update', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({}),
+                    timeoutMs: DOCKER_UPDATE_REQUEST_TIMEOUT_MS,
+                    timeoutMessage: 'Docker 更新启动超时',
+                    credentials: 'same-origin'
+                });
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok || !payload.success) {
+                    throw new Error(payload.error || 'Docker 更新启动失败');
+                }
+                dockerUpdateStatus = payload.docker_update || dockerUpdateStatus;
+                refreshDockerUpdateButton();
+                showToast(payload.message || 'Docker 更新任务已启动，正在等待结果', 'info');
+                window.setTimeout(() => monitorDockerUpdateResult(0), 2000);
+            } catch (error) {
+                await loadDockerUpdateStatus(true);
+                showToast(error?.message || 'Docker 更新启动失败', 'error');
+            }
+        }
+
         function applyVersionStatus(versionStatus = {}) {
             const statusBadge = document.getElementById('appVersionStatus');
             const hintEl = document.getElementById('appVersionHint');
             const actionLink = document.getElementById('appVersionActionLink');
+            const upgradeBadgeEl = document.getElementById('appVersionUpgradeBadge');
             const state = String(versionStatus.status || 'unknown').trim() || 'unknown';
             const badgeLabel = String(versionStatus.badge_label || '检查失败').trim() || '检查失败';
             const hint = String(versionStatus.hint || '暂时无法获取仓库版本信息').trim() || '暂时无法获取仓库版本信息';
             const updateUrl = String(versionStatus.update_url || '').trim();
             const defaultLabel = actionLink?.dataset.defaultLabel || '查看更新日志';
+            currentVersionStatusState = state;
 
             if (statusBadge) {
                 statusBadge.dataset.state = state;
@@ -665,10 +819,17 @@
                 hintEl.textContent = hint;
             }
 
+            if (upgradeBadgeEl) {
+                const shouldShowUpgradeBadge = state === 'update_available';
+                upgradeBadgeEl.hidden = !shouldShowUpgradeBadge;
+            }
+
             if (actionLink) {
                 actionLink.href = updateUrl || actionLink.href;
                 actionLink.textContent = state === 'update_available' ? '前往更新' : defaultLabel;
             }
+
+            refreshDockerUpdateButton();
         }
 
         async function loadVersionStatus(forceRefresh = false) {
@@ -713,6 +874,7 @@
 
         window.toggleVersionPopover = toggleVersionPopover;
         window.copyAppVersion = copyAppVersion;
+        window.startDockerUpdate = startDockerUpdate;
 
         function toggleNavbarActionsMenu() {
             if (!isMobileLayout()) return;
@@ -902,6 +1064,8 @@
                     setAppTimeZone(timeZone);
                 }
                 setShowAccountCreatedAt(String(data?.settings?.show_account_created_at) !== 'false');
+                setShowAccountSortOrder(String(data?.settings?.show_account_sort_order) === 'true');
+                setShowGroupId(String(data?.settings?.show_group_id) !== 'false');
                 return data?.settings || null;
             } catch (error) {
                 return null;
@@ -955,6 +1119,7 @@
 
             closeAllModals(); // 修复：应用启动时关闭所有模态框，防止浏览器缓存导致残留的模态框背景层
             loadVersionStatus();
+            loadDockerUpdateStatus();
             loadGroups();
             if (typeof loadTags === 'function') {
                 loadTags();
@@ -962,6 +1127,8 @@
             initColorPicker();
             initColorPicker();
             initEmailListScroll();
+            initAccountListScroll();
+            initAccountPageSizeSelect();
             window.addEventListener('pointermove', handleGlobalGroupPointerMove, { passive: false });
             window.addEventListener('pointerup', handleGlobalGroupPointerUp);
             window.addEventListener('pointercancel', handleGlobalGroupPointerUp);

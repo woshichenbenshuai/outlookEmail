@@ -1,9 +1,11 @@
 import importlib
+import io
 import os
 import pathlib
 import sys
 import tempfile
 import unittest
+import zipfile
 from email.message import EmailMessage
 from unittest.mock import patch
 
@@ -38,6 +40,9 @@ class ProjectRuntimeTests(unittest.TestCase):
             db.execute('DELETE FROM account_aliases')
             db.execute('DELETE FROM account_tags')
             db.execute('DELETE FROM tags')
+            db.execute('DELETE FROM temp_email_tags')
+            db.execute('DELETE FROM temp_email_messages')
+            db.execute('DELETE FROM temp_emails')
             db.execute('DELETE FROM accounts')
             db.execute("DELETE FROM groups WHERE name NOT IN ('默认分组', '临时邮箱')")
             db.commit()
@@ -101,6 +106,110 @@ class ProjectRuntimeTests(unittest.TestCase):
         payload = response.get_json()
         self.assertTrue(payload['success'])
         return payload['data']['accounts']
+
+    def test_accounts_api_imports_and_pages_ten_thousand_accounts(self):
+        account_lines = [
+            f'bulk{i:05d}@example.com----imap-password-{i}'
+            for i in range(10000)
+        ]
+
+        with patch.object(web_outlook_app, 'encrypt_data', side_effect=lambda value: value):
+            response = self.client.post('/api/accounts', json={
+                'account_string': '\n'.join(account_lines),
+                'group_id': 1,
+                'provider': 'gmail',
+            })
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload['success'])
+        self.assertEqual(payload['added_count'], 10000)
+
+        first_page = self.client.get(
+            '/api/accounts?group_id=1&limit=200&offset=0&sort_by=email&sort_order=asc'
+        )
+        self.assertEqual(first_page.status_code, 200)
+        first_payload = first_page.get_json()
+        self.assertTrue(first_payload['success'])
+        self.assertEqual(first_payload['total'], 10000)
+        self.assertEqual(len(first_payload['accounts']), 200)
+        self.assertTrue(first_payload['has_more'])
+        self.assertEqual(first_payload['accounts'][0]['email'], 'bulk00000@example.com')
+
+        last_page = self.client.get(
+            '/api/accounts?group_id=1&limit=200&offset=9800&sort_by=email&sort_order=asc'
+        )
+        self.assertEqual(last_page.status_code, 200)
+        last_payload = last_page.get_json()
+        self.assertTrue(last_payload['success'])
+        self.assertEqual(len(last_payload['accounts']), 200)
+        self.assertFalse(last_payload['has_more'])
+        self.assertEqual(last_payload['accounts'][-1]['email'], 'bulk09999@example.com')
+
+        max_page = self.client.get(
+            '/api/accounts?group_id=1&limit=20000&offset=0&sort_by=email&sort_order=asc'
+        )
+        self.assertEqual(max_page.status_code, 200)
+        max_payload = max_page.get_json()
+        self.assertTrue(max_payload['success'])
+        self.assertEqual(max_payload['limit'], 10000)
+        self.assertEqual(len(max_payload['accounts']), 10000)
+        self.assertFalse(max_payload['has_more'])
+
+    def test_refresh_selected_stream_processes_selected_active_outlook_accounts(self):
+        first_account_id = self._insert_account('first-selected@example.com')
+        second_account_id = self._insert_account('second-selected@example.com')
+        inactive_account_id = self._insert_account('inactive-selected@example.com', status='inactive')
+
+        with self.app.app_context():
+            db = web_outlook_app.get_db()
+            db.execute("UPDATE settings SET value = '0' WHERE key = 'refresh_delay_seconds'")
+            db.commit()
+
+        task_response = self.client.post('/api/accounts/refresh-selected-stream', json={
+            'account_ids': [second_account_id, inactive_account_id, first_account_id],
+        })
+        task_payload = task_response.get_json()
+        self.assertEqual(task_response.status_code, 200)
+        self.assertTrue(task_payload['success'])
+        self.assertIn('/api/accounts/refresh-selected-stream/', task_payload['stream_url'])
+        self.assertNotIn('account_ids', task_payload['stream_url'])
+
+        with patch.object(web_outlook_app, 'test_refresh_token', return_value=(True, None, '')) as token_mock:
+            response = self.client.get(task_payload['stream_url'])
+            body = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('text/event-stream', response.content_type)
+        self.assertEqual(token_mock.call_count, 2)
+        self.assertIn('"refresh_type": "manual_selected"', body)
+        self.assertIn(f'"account_id": {second_account_id}', body)
+        self.assertIn(f'"account_id": {first_account_id}', body)
+        self.assertNotIn(f'"account_id": {inactive_account_id}', body)
+
+        with patch.object(web_outlook_app, 'test_refresh_token', return_value=(True, None, '')) as legacy_token_mock:
+            legacy_response = self.client.get(
+                f'/api/accounts/refresh-selected-stream?account_ids={first_account_id}'
+            )
+            legacy_body = legacy_response.get_data(as_text=True)
+        self.assertEqual(legacy_response.status_code, 200)
+        self.assertEqual(legacy_token_mock.call_count, 0)
+        self.assertIn('"type": "error"', legacy_body)
+        self.assertIn('"refresh_type": "manual_selected"', legacy_body)
+
+        with self.app.app_context():
+            rows = web_outlook_app.get_db().execute(
+                '''
+                SELECT id, last_refresh_status
+                FROM accounts
+                WHERE id IN (?, ?, ?)
+                ''',
+                (first_account_id, second_account_id, inactive_account_id)
+            ).fetchall()
+        status_by_id = {row['id']: row['last_refresh_status'] for row in rows}
+        self.assertEqual(status_by_id[first_account_id], 'success')
+        self.assertEqual(status_by_id[second_account_id], 'success')
+        self.assertEqual(status_by_id[inactive_account_id], 'never')
 
     def test_csrf_token_endpoint_requires_login(self):
         anonymous_client = self.app.test_client()
@@ -515,6 +624,278 @@ class ProjectRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertIsNone(row['sort_order'])
 
+    def test_settings_show_account_sort_order_roundtrips(self):
+        response = self.client.get('/api/settings')
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload['success'])
+        self.assertEqual(payload['settings']['show_account_sort_order'], 'false')
+
+        update_response = self.client.put(
+            '/api/settings',
+            json={'show_account_sort_order': False}
+        )
+        self.assertEqual(update_response.status_code, 200)
+        update_payload = update_response.get_json()
+        self.assertTrue(update_payload['success'])
+
+        with self.app.app_context():
+            self.assertEqual(web_outlook_app.get_setting('show_account_sort_order'), 'false')
+
+        refreshed_response = self.client.get('/api/settings')
+        self.assertEqual(refreshed_response.status_code, 200)
+        refreshed_payload = refreshed_response.get_json()
+        self.assertTrue(refreshed_payload['success'])
+        self.assertEqual(refreshed_payload['settings']['show_account_sort_order'], 'false')
+
+    def test_webdav_backup_settings_require_login_password_when_changed(self):
+        with self.app.app_context():
+            web_outlook_app.set_setting('login_password', web_outlook_app.hash_password('current-password'))
+            web_outlook_app.set_setting('webdav_backup_enabled', 'false')
+            web_outlook_app.set_setting('webdav_backup_url', '')
+            web_outlook_app.set_setting('webdav_backup_username', '')
+            web_outlook_app.set_setting_encrypted('webdav_backup_password', '')
+            web_outlook_app.set_setting('webdav_backup_cron', '0 3 * * *')
+
+        response = self.client.put(
+            '/api/settings',
+            json={
+                'webdav_backup_enabled': True,
+                'webdav_backup_url': 'https://dav.example.com/backups',
+                'webdav_backup_username': 'dav-user',
+                'webdav_backup_password': 'dav-pass',
+                'webdav_backup_cron': '0 4 * * *',
+            }
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertFalse(payload['success'])
+        self.assertIn('登录密码', payload['error'])
+
+        with self.app.app_context():
+            self.assertEqual(web_outlook_app.get_setting('webdav_backup_enabled'), 'false')
+            self.assertEqual(web_outlook_app.get_setting('webdav_backup_url'), '')
+
+    def test_webdav_backup_settings_save_with_login_password(self):
+        with self.app.app_context():
+            web_outlook_app.set_setting('login_password', web_outlook_app.hash_password('current-password'))
+            web_outlook_app.set_setting('webdav_backup_enabled', 'false')
+            web_outlook_app.set_setting('webdav_backup_url', '')
+            web_outlook_app.set_setting('webdav_backup_username', '')
+            web_outlook_app.set_setting_encrypted('webdav_backup_password', '')
+            web_outlook_app.set_setting('webdav_backup_cron', '0 3 * * *')
+
+        response = self.client.put(
+            '/api/settings',
+            json={
+                'webdav_backup_enabled': True,
+                'webdav_backup_url': 'https://dav.example.com/backups',
+                'webdav_backup_username': 'dav-user',
+                'webdav_backup_password': 'dav-pass',
+                'webdav_backup_cron': '0 4 * * *',
+                'webdav_backup_verify_password': 'current-password',
+            }
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload['success'], msg=payload.get('error'))
+
+        settings_response = self.client.get('/api/settings')
+        self.assertEqual(settings_response.status_code, 200)
+        settings_payload = settings_response.get_json()
+        self.assertTrue(settings_payload['success'])
+        settings = settings_payload['settings']
+        self.assertEqual(settings['webdav_backup_enabled'], 'true')
+        self.assertEqual(settings['webdav_backup_url'], 'https://dav.example.com/backups')
+        self.assertEqual(settings['webdav_backup_username'], 'dav-user')
+        self.assertEqual(settings['webdav_backup_password'], 'dav-pass')
+        self.assertEqual(settings['webdav_backup_cron'], '0 4 * * *')
+        self.assertTrue(settings['webdav_backup_next_run'])
+
+        with self.app.app_context():
+            self.assertNotEqual(web_outlook_app.get_setting('webdav_backup_password'), 'dav-pass')
+
+    def test_webdav_backup_cron_requires_five_fields_when_saving(self):
+        with self.app.app_context():
+            web_outlook_app.set_setting('login_password', web_outlook_app.hash_password('current-password'))
+            web_outlook_app.set_setting('webdav_backup_enabled', 'false')
+            web_outlook_app.set_setting('webdav_backup_url', '')
+            web_outlook_app.set_setting('webdav_backup_username', '')
+            web_outlook_app.set_setting_encrypted('webdav_backup_password', '')
+            web_outlook_app.set_setting('webdav_backup_cron', '0 3 * * *')
+
+        response = self.client.put(
+            '/api/settings',
+            json={
+                'webdav_backup_enabled': True,
+                'webdav_backup_url': 'https://dav.example.com/backups',
+                'webdav_backup_username': 'dav-user',
+                'webdav_backup_password': 'dav-pass',
+                'webdav_backup_cron': '0 0 4 * * *',
+                'webdav_backup_verify_password': 'current-password',
+            }
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertFalse(payload['success'])
+        self.assertIn('仅支持 5 段 Cron', payload['error'])
+
+        with self.app.app_context():
+            self.assertEqual(web_outlook_app.get_setting('webdav_backup_cron'), '0 3 * * *')
+
+    def test_all_groups_backup_uses_selected_group_export_shape(self):
+        extra_group_id = self._create_group('备份分组')
+        self._insert_account('default-export@example.com', group_id=1)
+        self._insert_account('group-export@example.com', group_id=extra_group_id)
+
+        with self.app.app_context():
+            default_group = web_outlook_app.get_group_by_id(1)
+            export_payload = web_outlook_app.build_all_groups_export_content()
+
+        self.assertEqual(export_payload['total_count'], 2)
+        self.assertIn(default_group['name'], export_payload['content'])
+        self.assertIn('备份分组', export_payload['content'])
+        self.assertIn('default-export@example.com', export_payload['content'])
+        self.assertIn('group-export@example.com', export_payload['content'])
+
+    def test_run_webdav_backup_uploads_all_group_export_file(self):
+        self._insert_account('backup-upload@example.com', group_id=1)
+        with self.app.app_context():
+            web_outlook_app.set_setting('webdav_backup_enabled', 'true')
+            web_outlook_app.set_setting('webdav_backup_url', 'https://dav.example.com/backups/')
+            web_outlook_app.set_setting('webdav_backup_username', 'dav-user')
+            web_outlook_app.set_setting_encrypted('webdav_backup_password', 'dav-pass')
+
+            class ResponseStub:
+                status_code = 201
+
+            with patch.object(web_outlook_app.requests, 'put', return_value=ResponseStub()) as put_mock:
+                result = web_outlook_app.run_webdav_backup()
+
+        self.assertTrue(result['success'], msg=result.get('error'))
+        put_mock.assert_called_once()
+        call_args = put_mock.call_args
+        self.assertTrue(call_args.args[0].startswith('https://dav.example.com/backups/all_groups_backup_'))
+        self.assertEqual(call_args.kwargs['auth'], ('dav-user', 'dav-pass'))
+        self.assertIn('backup-upload@example.com', call_args.kwargs['data'].decode('utf-8'))
+        self.assertIn('默认分组', call_args.kwargs['data'].decode('utf-8'))
+
+    def test_webdav_backup_test_uploads_without_login_password(self):
+        class PutResponseStub:
+            status_code = 201
+
+        class DeleteResponseStub:
+            status_code = 204
+
+        with patch.object(web_outlook_app.requests, 'put') as put_mock:
+            put_mock.return_value = PutResponseStub()
+            with patch.object(web_outlook_app.requests, 'delete', return_value=DeleteResponseStub()) as delete_mock:
+                response = self.client.post(
+                    '/api/settings/test-webdav-backup',
+                    json={
+                        'config': {
+                            'url': 'https://dav.example.com/backups',
+                            'username': 'dav-user',
+                            'password': 'dav-pass',
+                        }
+                    }
+                )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload['success'], msg=payload.get('error'))
+        put_mock.assert_called_once()
+        delete_mock.assert_called_once()
+        self.assertEqual(put_mock.call_args.kwargs['auth'], ('dav-user', 'dav-pass'))
+
+    def test_webdav_backup_test_uploads_and_cleans_test_file(self):
+        with self.app.app_context():
+            web_outlook_app.set_setting('login_password', web_outlook_app.hash_password('current-password'))
+
+        class PutResponseStub:
+            status_code = 201
+
+        class DeleteResponseStub:
+            status_code = 204
+
+        with patch.object(web_outlook_app.requests, 'put', return_value=PutResponseStub()) as put_mock, \
+                patch.object(web_outlook_app.requests, 'delete', return_value=DeleteResponseStub()) as delete_mock:
+            response = self.client.post(
+                '/api/settings/test-webdav-backup',
+                json={
+                    'login_password': 'current-password',
+                    'config': {
+                        'url': 'https://dav.example.com/backups',
+                        'username': 'dav-user',
+                        'password': 'dav-pass',
+                    }
+                }
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload['success'], msg=payload.get('error'))
+        self.assertIn('目录可写', payload['message'])
+        put_mock.assert_called_once()
+        delete_mock.assert_called_once()
+        self.assertTrue(put_mock.call_args.args[0].startswith('https://dav.example.com/backups/outlookemail_webdav_test_'))
+        self.assertEqual(put_mock.call_args.kwargs['auth'], ('dav-user', 'dav-pass'))
+        self.assertEqual(delete_mock.call_args.kwargs['auth'], ('dav-user', 'dav-pass'))
+
+    def test_manual_webdav_upload_requires_login_password(self):
+        self._insert_account('manual-upload@example.com', group_id=1)
+        with self.app.app_context():
+            web_outlook_app.set_setting('login_password', web_outlook_app.hash_password('current-password'))
+
+        with patch.object(web_outlook_app.requests, 'put') as put_mock:
+            response = self.client.post(
+                '/api/settings/upload-webdav-backup',
+                json={
+                    'config': {
+                        'url': 'https://dav.example.com/backups',
+                        'username': 'dav-user',
+                        'password': 'dav-pass',
+                    }
+                }
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertFalse(payload['success'])
+        self.assertIn('登录密码', payload['error'])
+        put_mock.assert_not_called()
+
+    def test_manual_webdav_upload_uses_current_form_config(self):
+        self._insert_account('manual-upload@example.com', group_id=1)
+        with self.app.app_context():
+            web_outlook_app.set_setting('login_password', web_outlook_app.hash_password('current-password'))
+
+        class PutResponseStub:
+            status_code = 201
+
+        with patch.object(web_outlook_app.requests, 'put', return_value=PutResponseStub()) as put_mock:
+            response = self.client.post(
+                '/api/settings/upload-webdav-backup',
+                json={
+                    'login_password': 'current-password',
+                    'config': {
+                        'url': 'https://dav.example.com/manual',
+                        'username': 'manual-user',
+                        'password': 'manual-pass',
+                    }
+                }
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload['success'], msg=payload.get('error'))
+        self.assertTrue(payload['filename'].startswith('all_groups_backup_'))
+        put_mock.assert_called_once()
+        self.assertTrue(put_mock.call_args.args[0].startswith('https://dav.example.com/manual/all_groups_backup_'))
+        self.assertEqual(put_mock.call_args.kwargs['auth'], ('manual-user', 'manual-pass'))
+        self.assertIn('manual-upload@example.com', put_mock.call_args.kwargs['data'].decode('utf-8'))
+
     def test_imap_attachment_detail_and_download_route(self):
         with self.app.app_context():
             db = web_outlook_app.get_db()
@@ -541,6 +922,12 @@ class ProjectRuntimeTests(unittest.TestCase):
             maintype='text',
             subtype='plain',
             filename='report.txt',
+        )
+        message.add_attachment(
+            b'second body',
+            maintype='text',
+            subtype='plain',
+            filename='invoice.txt',
         )
         raw_email = message.as_bytes()
 
@@ -591,6 +978,16 @@ class ProjectRuntimeTests(unittest.TestCase):
             self.assertEqual(download_response.data, b'attachment body')
             self.assertIn("filename*=UTF-8''report.txt", download_response.headers.get('Content-Disposition', ''))
 
+            zip_response = self.client.get('/api/email/user@example.com/msg-1/attachments/download-all?method=imap&folder=inbox')
+            self.assertEqual(zip_response.status_code, 200)
+            self.assertEqual(zip_response.mimetype, 'application/zip')
+            self.assertIn("filename*=UTF-8''attachments.zip", zip_response.headers.get('Content-Disposition', ''))
+            self.assertIsNone(zip_response.headers.get('Content-Length'))
+            with zipfile.ZipFile(io.BytesIO(zip_response.data)) as archive:
+                self.assertEqual(set(archive.namelist()), {'report.txt', 'invoice.txt'})
+                self.assertEqual(archive.read('report.txt'), b'attachment body')
+                self.assertEqual(archive.read('invoice.txt'), b'second body')
+
 
 class FrontendTimezoneBootstrapTests(unittest.TestCase):
     def test_settings_js_no_longer_updates_timezone_in_add_account_flow(self):
@@ -610,13 +1007,69 @@ class FrontendTimezoneBootstrapTests(unittest.TestCase):
         self.assertIn('await loadAppTimeZoneFromSettings();', core_js)
         self.assertLess(core_js.index('await loadAppTimeZoneFromSettings();'), core_js.index('loadGroups();'))
         self.assertIn('setShowAccountCreatedAt(String(data?.settings?.show_account_created_at) !== \'false\');', core_js)
+        self.assertIn('setShowAccountSortOrder(String(data?.settings?.show_account_sort_order) === \'true\');', core_js)
         self.assertIn('const timeZone = getAppTimeZone();', oauth_js)
         self.assertIn('timeZone: getAppTimeZone()', refresh_js)
+
+    def test_webdav_backup_settings_ui_is_present(self):
+        settings_html = pathlib.Path(ROOT_DIR, 'templates', 'partials', 'index', 'dialogs-management.html').read_text(encoding='utf-8')
+        settings_js = pathlib.Path(ROOT_DIR, 'static', 'js', 'index', '07-settings.js').read_text(encoding='utf-8')
+
+        self.assertIn('id="settingsWebdavBackupSection"', settings_html)
+        self.assertIn('id="webdavBackupEnabled"', settings_html)
+        self.assertIn('id="webdavBackupCron"', settings_html)
+        self.assertIn('id="webdavBackupVerifyPassword"', settings_html)
+        self.assertIn('id="testWebdavBackupBtn"', settings_html)
+        self.assertIn('id="uploadWebdavBackupBtn"', settings_html)
+        self.assertIn('id="webdavBackupTestResult"', settings_html)
+        self.assertIn('selectWebdavBackupCronExample', settings_html)
+        self.assertIn('async function validateWebdavBackupCronExpression()', settings_js)
+        self.assertIn('async function testWebdavBackup()', settings_js)
+        self.assertIn('async function uploadWebdavBackupNow()', settings_js)
+        self.assertIn("fetch('/api/settings/test-webdav-backup'", settings_js)
+        self.assertIn("fetch('/api/settings/upload-webdav-backup'", settings_js)
+        self.assertIn('expected_fields: 5', settings_js)
+        self.assertIn('settings.webdav_backup_verify_password = webdavBackupVerifyPassword;', settings_js)
+
+    def test_temp_email_list_uses_selected_tag_filters(self):
+        temp_js = pathlib.Path(ROOT_DIR, 'static', 'js', 'index', '03-temp-emails.js').read_text(encoding='utf-8')
+
+        self.assertIn('selectedTagFilters.size > 0', temp_js)
+        self.assertNotIn('selectedTagIds', temp_js)
+
+    def test_save_settings_separates_saved_refresh_failure(self):
+        settings_js = pathlib.Path(ROOT_DIR, 'static', 'js', 'index', '07-settings.js').read_text(encoding='utf-8')
+
+        refresh_block = (
+            "try {\n"
+            "                await loadGroups();\n"
+            "                await refreshVisibleAccountList(false);\n"
+            "            } catch (error) {\n"
+            "                showToast('设置已保存，但列表刷新失败，请刷新页面', 'warning');"
+        )
+
+        self.assertIn(refresh_block, settings_js)
+        self.assertIn("showToast('设置已保存，但列表刷新失败，请刷新页面', 'warning');", settings_js)
+        self.assertIn("showToast('保存设置失败', 'error');\n                return;", settings_js)
+        self.assertLess(
+            settings_js.index('if (!data.success)'),
+            settings_js.index("showToast('设置已保存，但列表刷新失败，请刷新页面', 'warning');")
+        )
+
+    def test_attachment_download_links_use_busy_fetch_handler(self):
+        emails_js = pathlib.Path(ROOT_DIR, 'static', 'js', 'index', '05-emails.js').read_text(encoding='utf-8')
+
+        self.assertIn('function downloadEmailAttachmentFile(event, link)', emails_js)
+        self.assertIn('onclick="downloadEmailAttachmentFile(event, this)"', emails_js)
+        self.assertIn("link.textContent = isDownloading ? '打包中...' : link.dataset.defaultLabel;", emails_js)
+        self.assertIn("action.textContent = isDownloading ? '下载中...' : '下载';", emails_js)
+        self.assertIn("showToast(pendingMessage, 'info');", emails_js)
 
     def test_account_sort_ui_uses_sort_order_and_created_at(self):
         layout_html = pathlib.Path(ROOT_DIR, 'templates', 'partials', 'index', 'layout.html').read_text(encoding='utf-8')
         settings_html = pathlib.Path(ROOT_DIR, 'templates', 'partials', 'index', 'dialogs-management.html').read_text(encoding='utf-8')
         dialog_html = pathlib.Path(ROOT_DIR, 'templates', 'partials', 'index', 'dialogs-primary.html').read_text(encoding='utf-8')
+        core_js = pathlib.Path(ROOT_DIR, 'static', 'js', 'index', '01-core.js').read_text(encoding='utf-8')
         groups_js = pathlib.Path(ROOT_DIR, 'static', 'js', 'index', '02-groups.js').read_text(encoding='utf-8')
         settings_js = pathlib.Path(ROOT_DIR, 'static', 'js', 'index', '07-settings.js').read_text(encoding='utf-8')
 
@@ -624,16 +1077,88 @@ class FrontendTimezoneBootstrapTests(unittest.TestCase):
         self.assertIn('data-sort="sort_order"', layout_html)
         self.assertIn('data-sort="created_at"', layout_html)
         self.assertIn('id="settingsShowAccountCreatedAt"', settings_html)
+        self.assertIn('id="settingsShowAccountSortOrder"', settings_html)
+        self.assertIn('id="settingsShowGroupId"', settings_html)
         self.assertIn('id="editSortOrder"', dialog_html)
         self.assertIn("let currentSortBy = 'sort_order';", groups_js)
         self.assertIn("currentSortBy === 'sort_order'", groups_js)
         self.assertIn("currentSortBy === 'created_at'", groups_js)
         self.assertNotIn("currentSortBy === 'refresh_time'", groups_js)
         self.assertIn('shouldShowAccountCreatedAt()', groups_js)
+        self.assertIn('shouldShowAccountSortOrder()', groups_js)
+        self.assertIn('排序值 ${escapeHtml(String(sortOrder))}', groups_js)
         self.assertIn('formatAbsoluteDateTime(acc.created_at)', groups_js)
         self.assertIn("document.getElementById('editSortOrder').value = Number(acc.sort_order || 0);", settings_js)
         self.assertIn("document.getElementById('settingsShowAccountCreatedAt').checked = String(data.settings.show_account_created_at) !== 'false';", settings_js)
         self.assertIn('settings.show_account_created_at = showAccountCreatedAt;', settings_js)
+        self.assertIn("document.getElementById('settingsShowAccountSortOrder').checked = String(data.settings.show_account_sort_order) === 'true';", settings_js)
+        self.assertIn('settings.show_account_sort_order = showAccountSortOrder;', settings_js)
+        self.assertIn("document.getElementById('settingsShowGroupId').checked = String(data.settings.show_group_id) !== 'false';", settings_js)
+        self.assertIn('settings.show_group_id = showGroupId;', settings_js)
+        self.assertIn("setShowGroupId(String(data?.settings?.show_group_id) !== 'false');", core_js)
+        self.assertIn('if (!shouldShowGroupId()) {', core_js)
+
+    def test_settings_ui_reorganizes_general_and_gptmail_sections(self):
+        settings_html = pathlib.Path(ROOT_DIR, 'templates', 'partials', 'index', 'dialogs-management.html').read_text(encoding='utf-8')
+
+        general_section = settings_html.split('id="settingsGeneralSection"', 1)[1].split('</section>', 1)[0]
+        gptmail_section = settings_html.split('id="settingsAccessSection"', 1)[1].split('</section>', 1)[0]
+
+        self.assertIn('GPTMail 临时邮箱设置', settings_html)
+        self.assertIn('id="settingsPassword"', general_section)
+        self.assertIn('id="settingsExternalApiKey"', general_section)
+        self.assertIn('id="settingsShowGroupId"', general_section)
+        self.assertNotIn('id="settingsApiKey"', general_section)
+
+        self.assertIn('id="settingsApiKey"', gptmail_section)
+        self.assertNotIn('id="settingsPassword"', gptmail_section)
+        self.assertNotIn('id="settingsExternalApiKey"', gptmail_section)
+
+    def test_temp_mail_settings_sections_are_placed_last(self):
+        settings_html = pathlib.Path(ROOT_DIR, 'templates', 'partials', 'index', 'dialogs-management.html').read_text(encoding='utf-8')
+
+        self.assertLess(settings_html.index('data-target="settingsGeneralSection"'), settings_html.index('data-target="settingsRefreshSection"'))
+        self.assertLess(settings_html.index('data-target="settingsRefreshSection"'), settings_html.index('data-target="forwardingSettingsSection"'))
+        self.assertLess(settings_html.index('data-target="forwardingSettingsSection"'), settings_html.index('data-target="settingsAccessSection"'))
+        self.assertLess(settings_html.index('data-target="settingsAccessSection"'), settings_html.index('data-target="settingsDuckMailSection"'))
+        self.assertLess(settings_html.index('data-target="settingsDuckMailSection"'), settings_html.index('data-target="settingsCloudflareSection"'))
+
+        self.assertLess(settings_html.index('id="forwardingSettingsSection"'), settings_html.index('id="settingsAccessSection"'))
+        self.assertLess(settings_html.index('id="settingsAccessSection"'), settings_html.index('id="settingsDuckMailSection"'))
+        self.assertLess(settings_html.index('id="settingsDuckMailSection"'), settings_html.index('id="settingsCloudflareSection"'))
+
+    def test_version_popover_mentions_docker_only_online_update_setup(self):
+        layout_html = pathlib.Path(ROOT_DIR, 'templates', 'partials', 'index', 'layout.html').read_text(encoding='utf-8')
+
+        self.assertIn('仅 Docker 版本支持在线更新', layout_html)
+        self.assertIn('README 中的「启用界面 Docker 在线更新」', layout_html)
+        self.assertIn('https://github.com/assast/outlookEmail#readme', layout_html)
+
+    def test_version_chip_shows_upgrade_badge_markup_and_logic(self):
+        layout_html = pathlib.Path(ROOT_DIR, 'templates', 'partials', 'index', 'layout.html').read_text(encoding='utf-8')
+        core_js = pathlib.Path(ROOT_DIR, 'static', 'js', 'index', '01-core.js').read_text(encoding='utf-8')
+        navbar_css = pathlib.Path(ROOT_DIR, 'static', 'css', 'index', '02-navbar.css').read_text(encoding='utf-8')
+
+        self.assertIn('id="appVersionUpgradeBadge"', layout_html)
+        self.assertIn('aria-hidden="true"', layout_html)
+        self.assertIn('stroke="currentColor"', layout_html)
+        self.assertNotIn('id="appVersionUpgradeBadge" hidden>升级</span>', layout_html)
+        self.assertIn("const upgradeBadgeEl = document.getElementById('appVersionUpgradeBadge');", core_js)
+        self.assertIn("const shouldShowUpgradeBadge = state === 'update_available';", core_js)
+        self.assertIn('upgradeBadgeEl.hidden = !shouldShowUpgradeBadge;', core_js)
+        self.assertIn('loadVersionStatus();', core_js)
+        self.assertIn('.app-version-chip__upgrade-badge {', navbar_css)
+        self.assertIn('background: linear-gradient(180deg, #fef3c7 0%, #fde68a 100%);', navbar_css)
+        self.assertIn('color: #92400e;', navbar_css)
+        self.assertIn('.app-version-chip__upgrade-badge svg {', navbar_css)
+
+    def test_version_chip_uses_up_arrow_icon_and_respects_hidden_attribute(self):
+        layout_html = pathlib.Path(ROOT_DIR, 'templates', 'partials', 'index', 'layout.html').read_text(encoding='utf-8')
+        navbar_css = pathlib.Path(ROOT_DIR, 'static', 'css', 'index', '02-navbar.css').read_text(encoding='utf-8')
+
+        self.assertIn('<path d="M8 12.5V3.5"></path>', layout_html)
+        self.assertIn('<path d="M4.5 7L8 3.5 11.5 7"></path>', layout_html)
+        self.assertIn('.app-version-chip__upgrade-badge[hidden] {', navbar_css)
 
     def test_refresh_management_ui_uses_account_workbench_layout(self):
         settings_html = pathlib.Path(ROOT_DIR, 'templates', 'partials', 'index', 'dialogs-management.html').read_text(encoding='utf-8')
@@ -646,6 +1171,10 @@ class FrontendTimezoneBootstrapTests(unittest.TestCase):
         self.assertIn('id="refreshAccountList"', settings_html)
         self.assertIn('id="stopRefreshBtn"', settings_html)
         self.assertIn('id="refreshLogsList"', settings_html)
+        self.assertIn('id="refreshSelectedSummary"', settings_html)
+        self.assertIn('id="refreshSelectVisibleBtn"', settings_html)
+        self.assertIn('id="refreshSelectedBtn"', settings_html)
+        self.assertIn('id="refreshDeleteSelectedBtn"', settings_html)
         self.assertIn('class="refresh-account-table-wrap"', settings_html)
         self.assertIn('data-status="never"', settings_html)
         self.assertNotIn('id="refreshProgressBanner"', settings_html)
@@ -659,7 +1188,20 @@ class FrontendTimezoneBootstrapTests(unittest.TestCase):
         self.assertIn("data.type === 'account_result'", refresh_js)
         self.assertIn("data.type === 'stopped'", refresh_js)
         self.assertIn('/api/accounts/refresh-failed-stream', refresh_js)
+        self.assertIn("selectedAccountIds: new Set()", refresh_js)
+        self.assertIn("function toggleRefreshVisibleSelection()", refresh_js)
+        self.assertIn("function clearRefreshSelectionForScopeChange()", refresh_js)
+        self.assertIn("if (nextQuery !== refreshModalState.query)", refresh_js)
+        self.assertIn("if (nextStatus !== refreshModalState.status)", refresh_js)
+        self.assertIn("async function refreshSelectedRefreshAccounts()", refresh_js)
+        self.assertIn("async function deleteSelectedRefreshAccounts()", refresh_js)
+        self.assertIn("await refreshVisibleAccountList(true);", refresh_js)
+        self.assertIn("fetch('/api/accounts/refresh-selected-stream'", refresh_js)
+        self.assertIn('data.stream_url', refresh_js)
+        self.assertNotIn('/api/accounts/refresh-selected-stream?', refresh_js)
+        self.assertIn("fetch('/api/accounts/batch-delete'", refresh_js)
         self.assertIn('<table class="refresh-account-table">', refresh_js)
+        self.assertIn('class="refresh-account-select-checkbox"', refresh_js)
         self.assertIn("function setRefreshStatusFilter(status, triggerEl = null)", refresh_js)
         self.assertIn("async function openRefreshModalWithStatus(status = 'all')", refresh_js)
         self.assertNotIn('showFailedListFromData', refresh_js)
@@ -670,9 +1212,10 @@ class FrontendTimezoneBootstrapTests(unittest.TestCase):
         self.assertIn('.refresh-log-list', modal_css)
         self.assertIn('.refresh-account-table-wrap', modal_css)
         self.assertIn('.refresh-account-table', modal_css)
+        self.assertIn('.refresh-batch-actions', modal_css)
+        self.assertIn('.refresh-account-select-checkbox', modal_css)
         self.assertIn('.refresh-filter-chip', modal_css)
         self.assertNotIn('.refresh-progress-banner', modal_css)
-
 
 class SchedulerTimezoneMigrationTests(unittest.TestCase):
     def setUp(self):

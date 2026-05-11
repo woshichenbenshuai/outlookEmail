@@ -1,3 +1,14 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+if TYPE_CHECKING:
+    # These segmented files are executed into the shared `web_outlook_app`
+    # globals at runtime. Importing from the assembled module keeps IDE
+    # inspections from flagging the shared names as unresolved.
+    from web_outlook_app import *  # noqa: F403
+
+
 @app.route('/login', methods=['GET', 'POST'])
 @csrf_exempt  # 登录接口排除CSRF保护（用户未登录时无法获取token）
 def login():
@@ -360,6 +371,72 @@ def format_account_export_line(account: Dict[str, Any]) -> str:
     return f"{account['email']}----{account.get('password', '')}----{account.get('client_id', '')}----{account.get('refresh_token', '')}"
 
 
+def build_group_export_content(group_ids: List[int]) -> Dict[str, Any]:
+    """生成与“导出选中分组”一致的导出内容。"""
+    all_lines = []
+    exported_group_ids = []
+    total_count = 0
+
+    for group_id in group_ids:
+        group = get_group_by_id(group_id)
+        if not group:
+            continue
+
+        if group['name'] == '临时邮箱':
+            temp_emails = load_temp_emails()
+            if not temp_emails:
+                continue
+
+            exported_group_ids.append(group_id)
+            all_lines.append(group['name'])
+
+            gptmail_list = [te for te in temp_emails if te.get('provider', 'gptmail') == 'gptmail']
+            duckmail_list = [te for te in temp_emails if te.get('provider') == 'duckmail']
+            cloudflare_list = [te for te in temp_emails if te.get('provider') == 'cloudflare']
+
+            if gptmail_list:
+                all_lines.append('[gptmail]')
+                for te in gptmail_list:
+                    all_lines.append(te['email'])
+                    total_count += 1
+
+            if duckmail_list:
+                all_lines.append('[duckmail]')
+                for te in duckmail_list:
+                    duckmail_password = decrypt_data(te.get('duckmail_password', '')) if te.get('duckmail_password') else ''
+                    all_lines.append(f"{te['email']}----{duckmail_password}")
+                    total_count += 1
+
+            if cloudflare_list:
+                all_lines.append('[cloudflare]')
+                for te in cloudflare_list:
+                    cloudflare_jwt = decrypt_data(te.get('cloudflare_jwt', '')) if te.get('cloudflare_jwt') else ''
+                    all_lines.append(f"{te['email']}----{cloudflare_jwt}")
+                    total_count += 1
+            continue
+
+        accounts = load_accounts(group_id)
+        if not accounts:
+            continue
+
+        exported_group_ids.append(group_id)
+        all_lines.append(group['name'])
+        for acc in accounts:
+            all_lines.append(format_account_export_line(acc))
+            total_count += 1
+
+    return {
+        'content': '\n'.join(all_lines),
+        'total_count': total_count,
+        'group_ids': exported_group_ids,
+    }
+
+
+def build_all_groups_export_content() -> Dict[str, Any]:
+    groups = load_groups()
+    return build_group_export_content([group['id'] for group in groups])
+
+
 @app.route('/api/accounts/export')
 @login_required
 def api_export_all_accounts():
@@ -444,59 +521,16 @@ def api_export_selected_accounts():
     if not group_ids:
         return jsonify({'success': False, 'error': '请选择要导出的分组'})
 
-    # 获取选中分组下的所有账号
-    all_lines = []
-    total_count = 0
-    for group_id in group_ids:
-        group = get_group_by_id(group_id)
-        if not group:
-            continue
-
-        if group['name'] == '临时邮箱':
-            # 临时邮箱分组从 temp_emails 表获取数据
-            temp_emails = load_temp_emails()
-            if temp_emails:
-                all_lines.append(group['name'])
-
-                gptmail_list = [te for te in temp_emails if te.get('provider', 'gptmail') == 'gptmail']
-                duckmail_list = [te for te in temp_emails if te.get('provider') == 'duckmail']
-                cloudflare_list = [te for te in temp_emails if te.get('provider') == 'cloudflare']
-
-                if gptmail_list:
-                    all_lines.append('[gptmail]')
-                    for te in gptmail_list:
-                        all_lines.append(te['email'])
-                        total_count += 1
-
-                if duckmail_list:
-                    all_lines.append('[duckmail]')
-                    for te in duckmail_list:
-                        duckmail_password = decrypt_data(te.get('duckmail_password', '')) if te.get('duckmail_password') else ''
-                        all_lines.append(f"{te['email']}----{duckmail_password}")
-                        total_count += 1
-
-                if cloudflare_list:
-                    all_lines.append('[cloudflare]')
-                    for te in cloudflare_list:
-                        cloudflare_jwt = decrypt_data(te.get('cloudflare_jwt', '')) if te.get('cloudflare_jwt') else ''
-                        all_lines.append(f"{te['email']}----{cloudflare_jwt}")
-                        total_count += 1
-        else:
-            accounts = load_accounts(group_id)
-            if accounts:
-                all_lines.append(group['name'])
-                for acc in accounts:
-                    line = format_account_export_line(acc)
-                    all_lines.append(line)
-                    total_count += 1
+    export_payload = build_group_export_content(group_ids)
+    total_count = export_payload['total_count']
 
     if total_count == 0:
         return jsonify({'success': False, 'error': '选中的分组下没有邮箱账号'})
 
     # 记录审计日志
-    log_audit('export', 'selected_groups', ','.join(map(str, group_ids)), f"导出选中分组的 {total_count} 个账号")
+    log_audit('export', 'selected_groups', ','.join(map(str, export_payload['group_ids'])), f"导出选中分组的 {total_count} 个账号")
 
-    content = '\n'.join(all_lines)
+    content = export_payload['content']
 
     # 生成文件名
     filename = f"selected_accounts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
@@ -527,8 +561,7 @@ def api_generate_export_verify_token():
     if not result:
         return jsonify({'success': False, 'error': '系统配置错误'})
 
-    stored_password = result[0]
-    if not verify_password(password, stored_password):
+    if not verify_login_password(password):
         return jsonify({'success': False, 'error': '密码错误'})
 
     # 生成一次性验证token
@@ -557,18 +590,65 @@ def api_generate_export_verify_token():
 
 # ==================== 邮箱账号 API ====================
 
+def get_account_list_request_args() -> Dict[str, Any]:
+    limit_arg = request.args.get('limit')
+    limit, offset = normalize_account_pagination(limit_arg, request.args.get('offset', 0))
+    sort_by, sort_order = normalize_account_sort(
+        request.args.get('sort_by', 'created_at'),
+        request.args.get('sort_order', 'desc')
+    )
+    include_untagged = str(request.args.get('include_untagged', '')).strip().lower() in {'1', 'true', 'yes'}
+    return {
+        'limit': limit,
+        'offset': offset,
+        'sort_by': sort_by,
+        'sort_order': sort_order,
+        'tag_ids': normalize_tag_filter_values(request.args.get('tag_ids', '')),
+        'include_untagged': include_untagged,
+    }
+
+
+def build_account_list_response(accounts: List[Dict[str, Any]], total: int,
+                                limit: Optional[int], offset: int) -> Dict[str, Any]:
+    loaded_count = len(accounts)
+    effective_limit = limit if limit is not None else loaded_count
+    return {
+        'success': True,
+        'accounts': accounts,
+        'total': total,
+        'limit': effective_limit,
+        'offset': offset,
+        'has_more': offset + loaded_count < total,
+    }
+
+
 @app.route('/api/accounts', methods=['GET'])
 @login_required
 def api_get_accounts():
     """获取所有账号"""
     group_id = request.args.get('group_id', type=int)
-    accounts = load_accounts(group_id)
+    list_args = get_account_list_request_args()
+    accounts = load_accounts(
+        group_id,
+        limit=list_args['limit'],
+        offset=list_args['offset'],
+        sort_by=list_args['sort_by'],
+        sort_order=list_args['sort_order'],
+        tag_ids=list_args['tag_ids'],
+        include_untagged=list_args['include_untagged'],
+    )
 
     # 返回时隐藏敏感信息
     safe_accounts = []
     for acc in accounts:
         safe_accounts.append(serialize_account_summary(acc))
-    return jsonify({'success': True, 'accounts': safe_accounts})
+    total = count_accounts(group_id, tag_ids=list_args['tag_ids'], include_untagged=list_args['include_untagged'])
+    return jsonify(build_account_list_response(
+        safe_accounts,
+        total,
+        list_args['limit'],
+        list_args['offset'],
+    ))
 
 
 @app.route('/api/external/accounts', methods=['GET'])
@@ -584,7 +664,6 @@ def api_external_get_accounts():
         safe_accounts.append(
             serialize_account_summary(
                 acc,
-                None,
                 include_client_meta=False,
                 include_imap_meta=False
             )
@@ -932,31 +1011,35 @@ def api_batch_update_account_forwarding():
 def api_search_accounts():
     """全局搜索账号"""
     query = request.args.get('q', '').strip()
+    list_args = get_account_list_request_args()
 
     if not query:
-        return jsonify({'success': True, 'accounts': []})
+        return jsonify(build_account_list_response([], 0, list_args['limit'], list_args['offset']))
 
-    db = get_db()
-    # 支持搜索邮箱、备注和标签
-    cursor = db.execute('''
-        SELECT DISTINCT a.*, g.name as group_name, g.color as group_color
-        FROM accounts a
-        LEFT JOIN groups g ON a.group_id = g.id
-        LEFT JOIN account_aliases aa ON a.id = aa.account_id
-        LEFT JOIN account_tags at ON a.id = at.account_id
-        LEFT JOIN tags t ON at.tag_id = t.id
-        WHERE a.email LIKE ? OR a.remark LIKE ? OR t.name LIKE ? OR aa.alias_email LIKE ?
-        ORDER BY a.created_at DESC
-    ''', (f'%{query}%', f'%{query}%', f'%{query}%', f'%{query}%'))
-
-    rows = cursor.fetchall()
+    accounts = search_account_records(
+        query,
+        limit=list_args['limit'],
+        offset=list_args['offset'],
+        sort_by=list_args['sort_by'],
+        sort_order=list_args['sort_order'],
+        tag_ids=list_args['tag_ids'],
+        include_untagged=list_args['include_untagged'],
+    )
     safe_accounts = []
-    for row in rows:
-        acc = resolve_account_record(row)
-        acc['tags'] = get_account_tags(acc['id'])
-        safe_accounts.append(serialize_account_summary(acc))
+    for acc in accounts:
+        safe_accounts.append(serialize_account_summary(acc, {}))
 
-    return jsonify({'success': True, 'accounts': safe_accounts})
+    total = count_accounts(
+        query=query,
+        tag_ids=list_args['tag_ids'],
+        include_untagged=list_args['include_untagged'],
+    )
+    return jsonify(build_account_list_response(
+        safe_accounts,
+        total,
+        list_args['limit'],
+        list_args['offset'],
+    ))
 
 
 @app.route('/api/accounts/<int:account_id>', methods=['GET'])
@@ -1064,7 +1147,8 @@ def api_add_account():
     
     # 支持批量导入（多行）
     lines = account_str.strip().split('\n')
-    added = 0
+    parsed_accounts = []
+    invalid_count = 0
     
     for line in lines:
         line = line.strip()
@@ -1073,27 +1157,37 @@ def api_add_account():
         
         parsed = parse_account_import(line, account_format, provider, imap_host, imap_port)
         if parsed:
-            if add_account(
-                parsed['email'],
-                parsed.get('password', ''),
-                parsed.get('client_id', ''),
-                parsed.get('refresh_token', ''),
-                group_id,
-                '',
-                parsed.get('account_type', 'outlook'),
-                parsed.get('provider', provider),
-                parsed.get('imap_host', ''),
-                parsed.get('imap_port', 993),
-                parsed.get('imap_password', ''),
-                forward_enabled,
-                sort_order
-            ):
-                added += 1
+            parsed_accounts.append(parsed)
+        else:
+            invalid_count += 1
+
+    result = add_accounts_bulk(parsed_accounts, group_id, forward_enabled, sort_order)
+    added = result.get('added_count', 0)
+    skipped_count = result.get('skipped_count', 0)
     
     if added > 0:
-        return jsonify({'success': True, 'message': f'成功添加 {added} 个账号'})
+        message = f'成功添加 {added} 个账号'
+        detail_parts = []
+        if skipped_count:
+            detail_parts.append(f'跳过重复 {skipped_count} 个')
+        if invalid_count:
+            detail_parts.append(f'格式无效 {invalid_count} 行')
+        if detail_parts:
+            message += '，' + '，'.join(detail_parts)
+        return jsonify({
+            'success': True,
+            'message': message,
+            'added_count': added,
+            'skipped_count': skipped_count,
+            'invalid_count': invalid_count,
+        })
     else:
-        return jsonify({'success': False, 'error': '没有新账号被添加（可能格式错误或已存在）'})
+        return jsonify({
+            'success': False,
+            'error': '没有新账号被添加（可能格式错误或已存在）',
+            'skipped_count': skipped_count,
+            'invalid_count': invalid_count,
+        })
 
 
 @app.route('/api/accounts/<int:account_id>', methods=['PUT'])

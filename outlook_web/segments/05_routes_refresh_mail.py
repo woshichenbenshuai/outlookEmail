@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, wait
+import secrets
 import threading
+import time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
@@ -17,7 +19,10 @@ VALID_REFRESH_STATUS_FILTERS = {'all', 'success', 'failed', 'never'}
 TOKEN_REFRESH_CONFLICT_MESSAGE = '已有 Token 全量刷新任务在执行，请稍后再试'
 TOKEN_REFRESH_STOP_REQUESTED_MESSAGE = '已请求停止，当前账号处理完成后会结束任务'
 TOKEN_REFRESH_STOPPED_MESSAGE = '已手动停止全量刷新任务'
+SELECTED_REFRESH_TASK_TTL_SECONDS = 300
 token_refresh_stop_event = threading.Event()
+selected_refresh_tasks: Dict[str, Dict[str, Any]] = {}
+selected_refresh_tasks_lock = threading.Lock()
 
 
 def normalize_account_refresh_status_value(status: Any) -> str:
@@ -869,6 +874,26 @@ def load_active_outlook_accounts_for_refresh(db_conn) -> List[sqlite3.Row]:
     return cursor.fetchall()
 
 
+def load_selected_outlook_accounts_for_refresh(db_conn, account_ids: List[int]) -> List[sqlite3.Row]:
+    if not account_ids:
+        return []
+
+    placeholders = ','.join('?' * len(account_ids))
+    rows = db_conn.execute(
+        f'''
+        SELECT id, email, client_id, refresh_token, group_id, status, account_type, provider
+        FROM accounts
+        WHERE id IN ({placeholders})
+        ''',
+        tuple(account_ids)
+    ).fetchall()
+    order_map = {account_id: index for index, account_id in enumerate(account_ids)}
+    return sorted(
+        [row for row in rows if is_outlook_refreshable_account(row)],
+        key=lambda row: order_map.get(row['id'], len(order_map)),
+    )
+
+
 def load_failed_outlook_accounts_for_refresh(db_conn) -> List[sqlite3.Row]:
     cursor = db_conn.execute(
         '''
@@ -1293,6 +1318,193 @@ def stream_failed_refresh_events():
         release_token_refresh_run_lock(lock_acquired)
 
 
+def normalize_refresh_account_ids(raw_account_ids: Any) -> List[int]:
+    if isinstance(raw_account_ids, str):
+        candidates = raw_account_ids.replace('\n', ',').split(',')
+    elif isinstance(raw_account_ids, list):
+        candidates = raw_account_ids
+    else:
+        candidates = []
+
+    account_ids = []
+    seen_ids = set()
+    for account_id in candidates:
+        try:
+            normalized_id = int(account_id)
+        except (TypeError, ValueError):
+            continue
+        if normalized_id <= 0 or normalized_id in seen_ids:
+            continue
+        seen_ids.add(normalized_id)
+        account_ids.append(normalized_id)
+    return account_ids
+
+
+def prune_expired_selected_refresh_tasks(now: float) -> None:
+    expired_before = now - SELECTED_REFRESH_TASK_TTL_SECONDS
+    expired_task_ids = [
+        task_id
+        for task_id, task in selected_refresh_tasks.items()
+        if float(task.get('created_at') or 0) < expired_before
+    ]
+    for task_id in expired_task_ids:
+        selected_refresh_tasks.pop(task_id, None)
+
+
+def create_selected_refresh_task(account_ids: List[int]) -> str:
+    now = time.time()
+    with selected_refresh_tasks_lock:
+        prune_expired_selected_refresh_tasks(now)
+        while True:
+            task_id = secrets.token_urlsafe(24)
+            if task_id not in selected_refresh_tasks:
+                break
+        selected_refresh_tasks[task_id] = {
+            'account_ids': list(account_ids),
+            'created_at': now,
+        }
+    return task_id
+
+
+def pop_selected_refresh_task(task_id: str) -> Optional[List[int]]:
+    normalized_task_id = str(task_id or '').strip()
+    if not normalized_task_id:
+        return None
+
+    now = time.time()
+    with selected_refresh_tasks_lock:
+        prune_expired_selected_refresh_tasks(now)
+        task = selected_refresh_tasks.pop(normalized_task_id, None)
+
+    if not task:
+        return None
+    return normalize_refresh_account_ids(task.get('account_ids') or [])
+
+
+def stream_selected_refresh_task_events(task_id: str):
+    import json
+
+    account_ids = pop_selected_refresh_task(task_id)
+    if account_ids is None:
+        payload = {
+            'type': 'error',
+            'message': '刷新任务不存在或已过期',
+            'refresh_type': 'manual_selected',
+        }
+        yield f"data: {json.dumps(payload)}\n\n"
+        return
+
+    yield from stream_selected_refresh_events(account_ids)
+
+
+def stream_selected_refresh_events(account_ids: List[int]):
+    import json
+
+    conn = None
+    lock_acquired = False
+    accounts: List[sqlite3.Row] = []
+    delay_seconds = 0
+    total = 0
+    success_count = 0
+    failed_count = 0
+    failed_list: List[Dict[str, Any]] = []
+    current_account = None
+    current_account_counted = False
+
+    if not account_ids:
+        yield f"data: {json.dumps({'type': 'error', 'message': '请选择要刷新的账号', 'refresh_type': 'manual_selected'})}\n\n"
+        return
+
+    try:
+        acquire_token_refresh_run_lock()
+        lock_acquired = True
+        clear_token_refresh_stop_request()
+        conn = sqlite3.connect(DATABASE)
+        conn.execute('PRAGMA foreign_keys = ON')
+        conn.row_factory = sqlite3.Row
+
+        cleanup_refresh_logs(conn)
+        conn.commit()
+
+        accounts = load_selected_outlook_accounts_for_refresh(conn, account_ids)
+        delay_seconds = get_refresh_delay_seconds(conn)
+        total = len(accounts)
+
+        yield f"data: {json.dumps({'type': 'start', 'total': total, 'delay_seconds': delay_seconds, 'refresh_type': 'manual_selected'})}\n\n"
+
+        for index, account in enumerate(accounts, 1):
+            if is_token_refresh_stop_requested():
+                yield f"data: {json.dumps(build_stopped_refresh_payload(total, success_count, failed_count, failed_list, delay_seconds=delay_seconds, refresh_type='manual_selected'))}\n\n"
+                return
+
+            current_account = account
+            current_account_counted = False
+            yield f"data: {json.dumps({'type': 'progress', 'current': index, 'total': total, 'account_id': account['id'], 'email': account['email'], 'success_count': success_count, 'failed_count': failed_count})}\n\n"
+
+            result = refresh_outlook_account_token(account, 'manual_selected', db_conn=conn)
+            conn.commit()
+
+            if result.get('success'):
+                success_count += 1
+            else:
+                failed_count += 1
+                failed_list.append({
+                    'id': account['id'],
+                    'email': account['email'],
+                    'error': result.get('error_message') or '未知错误',
+                })
+            current_account_counted = True
+
+            yield f"data: {json.dumps({'type': 'account_result', 'current': index, 'total': total, 'account_id': account['id'], 'email': account['email'], 'status': 'success' if result.get('success') else 'failed', 'error_message': result.get('error_message') or '', 'success_count': success_count, 'failed_count': failed_count})}\n\n"
+
+            if is_token_refresh_stop_requested():
+                yield f"data: {json.dumps(build_stopped_refresh_payload(total, success_count, failed_count, failed_list, delay_seconds=delay_seconds, refresh_type='manual_selected'))}\n\n"
+                return
+
+            current_account = None
+
+            if index < total and delay_seconds > 0:
+                yield f"data: {json.dumps({'type': 'delay', 'seconds': delay_seconds, 'refresh_type': 'manual_selected'})}\n\n"
+                if not wait_refresh_delay(delay_seconds):
+                    yield f"data: {json.dumps(build_stopped_refresh_payload(total, success_count, failed_count, failed_list, delay_seconds=delay_seconds, refresh_type='manual_selected'))}\n\n"
+                    return
+
+        yield f"data: {json.dumps({'type': 'complete', 'total': total, 'success_count': success_count, 'failed_count': failed_count, 'failed_list': failed_list, 'delay_seconds': delay_seconds, 'refresh_type': 'manual_selected'})}\n\n"
+    except TokenRefreshInProgressError as exc:
+        yield f"data: {json.dumps({'type': 'conflict', 'message': str(exc), 'refresh_type': 'manual_selected'})}\n\n"
+    except Exception as exc:
+        failure_message = sanitize_error_details(str(exc)) or '未知错误'
+        if conn is not None and current_account is not None and not current_account_counted:
+            failed_count += 1
+            failed_list.append({
+                'id': current_account['id'],
+                'email': current_account['email'],
+                'error': failure_message,
+            })
+            try:
+                log_refresh_result(
+                    current_account['id'],
+                    current_account['email'],
+                    'manual_selected',
+                    'failed',
+                    failure_message,
+                    db_conn=conn
+                )
+                conn.commit()
+            except Exception as log_error:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                print(f"记录异常批量刷新结果失败: {str(log_error)}")
+        yield f"data: {json.dumps({'type': 'error', 'message': failure_message, 'total': total, 'success_count': success_count, 'failed_count': failed_count, 'failed_list': failed_list, 'refresh_type': 'manual_selected'})}\n\n"
+    finally:
+        if conn is not None:
+            conn.close()
+        clear_token_refresh_stop_request()
+        release_token_refresh_run_lock(lock_acquired)
+
+
 @app.route('/api/accounts/refresh-all', methods=['GET'])
 @login_required
 def api_refresh_all_accounts():
@@ -1312,6 +1524,37 @@ def api_retry_refresh_account(account_id):
 def api_refresh_failed_accounts_stream():
     """流式重试所有失败账号"""
     return Response(stream_failed_refresh_events(), mimetype='text/event-stream')
+
+
+@app.route('/api/accounts/refresh-selected-stream', methods=['POST'])
+@login_required
+def api_create_refresh_selected_accounts_stream_task():
+    """初始化选中账号流式刷新任务。"""
+    data = request.get_json(silent=True) or {}
+    account_ids = normalize_refresh_account_ids(data.get('account_ids') or [])
+    if not account_ids:
+        return jsonify({'success': False, 'error': '请选择要刷新的账号'})
+
+    task_id = create_selected_refresh_task(account_ids)
+    return jsonify({
+        'success': True,
+        'task_id': task_id,
+        'stream_url': f'/api/accounts/refresh-selected-stream/{task_id}',
+    })
+
+
+@app.route('/api/accounts/refresh-selected-stream/<task_id>', methods=['GET'])
+@login_required
+def api_refresh_selected_accounts_task_stream(task_id):
+    """订阅选中账号流式刷新任务。"""
+    return Response(stream_selected_refresh_task_events(task_id), mimetype='text/event-stream')
+
+
+@app.route('/api/accounts/refresh-selected-stream', methods=['GET'])
+@login_required
+def api_refresh_selected_accounts_stream():
+    """选中账号流式刷新需先通过 POST 初始化任务。"""
+    return Response(stream_selected_refresh_task_events(''), mimetype='text/event-stream')
 
 
 @app.route('/api/accounts/refresh-failed', methods=['POST'])
@@ -2378,6 +2621,247 @@ def api_get_email_detail(email_addr, message_id):
     return jsonify({'success': False, 'error': '获取邮件详情失败'})
 
 
+def download_email_attachment_for_account(account, method, message_id, attachment_id, folder, proxy_url, fallback_proxy_urls):
+    if account.get('account_type') == 'imap':
+        return download_email_attachment_imap_generic_result(
+            account['email'],
+            account.get('imap_password', ''),
+            account.get('imap_host', ''),
+            account.get('imap_port', 993),
+            message_id,
+            attachment_id,
+            folder,
+            account.get('provider', 'custom'),
+            proxy_url
+        )
+
+    if method == 'graph':
+        return download_email_attachment_graph_result(
+            account['client_id'],
+            account['refresh_token'],
+            message_id,
+            attachment_id,
+            proxy_url,
+            fallback_proxy_urls,
+        )
+
+    return download_email_attachment_imap_result(
+        account['email'],
+        account['client_id'],
+        account['refresh_token'],
+        message_id,
+        attachment_id,
+        folder,
+        proxy_url,
+        fallback_proxy_urls,
+    )
+
+
+def get_email_attachment_metadata_for_download(account, method, message_id, folder, proxy_url, fallback_proxy_urls):
+    if account.get('account_type') == 'imap':
+        detail_result = get_email_detail_imap_generic_result(
+            account['email'],
+            account.get('imap_password', ''),
+            account.get('imap_host', ''),
+            account.get('imap_port', 993),
+            message_id,
+            folder,
+            account.get('provider', 'custom'),
+            proxy_url
+        )
+        if detail_result.get('success'):
+            return {'success': True, 'attachments': detail_result.get('email', {}).get('attachments', [])}
+        return {'success': False, 'error': detail_result.get('error', '获取附件列表失败')}
+
+    if method == 'graph':
+        attachments = get_email_attachments_graph(
+            account['client_id'],
+            account['refresh_token'],
+            message_id,
+            proxy_url,
+            fallback_proxy_urls,
+        )
+        if attachments is None:
+            return {'success': False, 'error': '获取附件列表失败'}
+        return {'success': True, 'attachments': attachments}
+
+    detail = get_email_detail_imap(
+        account['email'],
+        account['client_id'],
+        account['refresh_token'],
+        message_id,
+        folder,
+        proxy_url,
+        fallback_proxy_urls,
+    )
+    if detail:
+        return {'success': True, 'attachments': detail.get('attachments', [])}
+    return {'success': False, 'error': '获取附件列表失败'}
+
+
+def build_zip_attachment_name(filename, used_names):
+    filename = sanitize_attachment_filename(filename, 'attachment')
+    name_root, dot, extension = filename.rpartition('.')
+    if not dot or not name_root:
+        name_root = filename
+        extension = ''
+
+    candidate = filename
+    counter = 2
+    while candidate in used_names:
+        suffix = f" ({counter})"
+        candidate = f"{name_root}{suffix}.{extension}" if extension else f"{name_root}{suffix}"
+        counter += 1
+    used_names.add(candidate)
+    return candidate
+
+
+ZIP_STREAM_CHUNK_SIZE = 64 * 1024
+
+
+class StreamingZipBuffer:
+    def __init__(self):
+        self._position = 0
+        self._chunks = []
+
+    def write(self, data):
+        if not data:
+            return 0
+        chunk = bytes(data)
+        self._chunks.append(chunk)
+        self._position += len(chunk)
+        return len(chunk)
+
+    def tell(self):
+        return self._position
+
+    def seek(self, *_args, **_kwargs):
+        raise OSError('streaming zip buffer does not support seek')
+
+    def flush(self):
+        pass
+
+    def drain(self):
+        chunks = self._chunks
+        self._chunks = []
+        return chunks
+
+
+def iter_zip_content_chunks(content, chunk_size=ZIP_STREAM_CHUNK_SIZE):
+    if isinstance(content, str):
+        content = content.encode('utf-8')
+    content = content or b''
+    for offset in range(0, len(content), chunk_size):
+        yield content[offset:offset + chunk_size]
+
+
+def drain_streaming_zip_buffer(zip_buffer):
+    for chunk in zip_buffer.drain():
+        if chunk:
+            yield chunk
+
+
+def stringify_attachment_download_error(error):
+    if isinstance(error, dict):
+        return str(error.get('message') or error.get('code') or error)
+    return str(error or '获取附件失败')
+
+
+def stream_email_attachments_zip(account, method, message_id, attachments, folder, proxy_url, fallback_proxy_urls):
+    import zipfile
+
+    zip_buffer = StreamingZipBuffer()
+    used_names = set()
+    error_lines = []
+
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
+        for attachment in attachments:
+            result = download_email_attachment_for_account(
+                account,
+                method,
+                message_id,
+                attachment.get('id'),
+                folder,
+                proxy_url,
+                fallback_proxy_urls,
+            )
+            if not result.get('success'):
+                attachment_name = sanitize_attachment_filename(
+                    attachment.get('name', ''),
+                    str(attachment.get('id') or 'attachment')
+                )
+                error_lines.append(f"{attachment_name}: {stringify_attachment_download_error(result.get('error'))}")
+                continue
+
+            zip_name = build_zip_attachment_name(
+                result.get('filename') or attachment.get('name') or 'attachment',
+                used_names
+            )
+            content = result.get('content', b'') or b''
+            with archive.open(zip_name, 'w') as entry:
+                yield from drain_streaming_zip_buffer(zip_buffer)
+                for chunk in iter_zip_content_chunks(content):
+                    entry.write(chunk)
+                    yield from drain_streaming_zip_buffer(zip_buffer)
+            yield from drain_streaming_zip_buffer(zip_buffer)
+
+        if error_lines:
+            error_name = build_zip_attachment_name('download-errors.txt', used_names)
+            error_content = '\n'.join(error_lines)
+            with archive.open(error_name, 'w') as entry:
+                yield from drain_streaming_zip_buffer(zip_buffer)
+                for chunk in iter_zip_content_chunks(error_content):
+                    entry.write(chunk)
+                    yield from drain_streaming_zip_buffer(zip_buffer)
+            yield from drain_streaming_zip_buffer(zip_buffer)
+
+    yield from drain_streaming_zip_buffer(zip_buffer)
+
+
+@app.route('/api/email/<email_addr>/<path:message_id>/attachments/download-all')
+@login_required
+def api_download_all_email_attachments(email_addr, message_id):
+    """打包下载邮件所有附件"""
+    account = get_account_by_email(email_addr)
+    if not account:
+        return jsonify({'success': False, 'error': '账号不存在'})
+
+    method = request.args.get('method', 'graph')
+    folder = normalize_folder_name(request.args.get('folder', 'inbox'))
+    proxy_url = get_account_proxy_url(account)
+    fallback_proxy_urls = get_account_proxy_failover_urls(account)
+    metadata_result = get_email_attachment_metadata_for_download(
+        account,
+        method,
+        message_id,
+        folder,
+        proxy_url,
+        fallback_proxy_urls,
+    )
+    if not metadata_result.get('success'):
+        return jsonify({'success': False, 'error': metadata_result.get('error', '获取附件列表失败')})
+
+    attachments = [attachment for attachment in metadata_result.get('attachments', []) if attachment.get('id')]
+    if not attachments:
+        return jsonify({'success': False, 'error': '没有可下载附件'})
+
+    response = Response(
+        stream_email_attachments_zip(
+            account,
+            method,
+            message_id,
+            attachments,
+            folder,
+            proxy_url,
+            fallback_proxy_urls,
+        ),
+        mimetype='application/zip'
+    )
+    response.headers['Content-Disposition'] = "attachment; filename*=UTF-8''attachments.zip"
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
 @app.route('/api/email/<email_addr>/<path:message_id>/attachments/<path:attachment_id>')
 @login_required
 def api_download_email_attachment(email_addr, message_id, attachment_id):
@@ -2390,39 +2874,15 @@ def api_download_email_attachment(email_addr, message_id, attachment_id):
     folder = normalize_folder_name(request.args.get('folder', 'inbox'))
     proxy_url = get_account_proxy_url(account)
     fallback_proxy_urls = get_account_proxy_failover_urls(account)
-
-    if account.get('account_type') == 'imap':
-        result = download_email_attachment_imap_generic_result(
-            account['email'],
-            account.get('imap_password', ''),
-            account.get('imap_host', ''),
-            account.get('imap_port', 993),
-            message_id,
-            attachment_id,
-            folder,
-            account.get('provider', 'custom'),
-            proxy_url
-        )
-    elif method == 'graph':
-        result = download_email_attachment_graph_result(
-            account['client_id'],
-            account['refresh_token'],
-            message_id,
-            attachment_id,
-            proxy_url,
-            fallback_proxy_urls,
-        )
-    else:
-        result = download_email_attachment_imap_result(
-            account['email'],
-            account['client_id'],
-            account['refresh_token'],
-            message_id,
-            attachment_id,
-            folder,
-            proxy_url,
-            fallback_proxy_urls,
-        )
+    result = download_email_attachment_for_account(
+        account,
+        method,
+        message_id,
+        attachment_id,
+        folder,
+        proxy_url,
+        fallback_proxy_urls,
+    )
 
     if not result.get('success'):
         return jsonify({'success': False, 'error': result.get('error', '获取附件失败')})

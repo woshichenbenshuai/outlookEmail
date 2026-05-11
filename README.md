@@ -2,7 +2,7 @@
 
 一个面向多邮箱账号场景的邮件管理工具，支持通过 Outlook/Hotmail OAuth、Microsoft Graph API 和标准 IMAP 统一读取、管理和转发邮件，并提供 Web 界面用于分组管理、账号管理、邮件查看和对外 API 调用。当前支持 Outlook/Hotmail、Gmail、QQ、163、126、Yahoo、阿里邮箱以及自定义 IMAP 邮箱，同时集成 GPTMail、DuckMail、Cloudflare Temp Email 多提供商临时邮箱能力。
 ## 📦 快速开始
-### 体验站点
+### 体验站点（可能非最新版本）
 https://aso.de5.net
 admin123
 注意：体验站点请勿修改密码或存放实际数据，部署在无持久化的服务上，数据随时可能丢失恢复初始状态
@@ -82,6 +82,10 @@ python web_outlook_app.py
 访问 `http://localhost:5000` 即可使用。
 如果是服务器部署，仍然建议显式设置固定 `SECRET_KEY`。
 
+### 运行模式
+
+服务需要保持单 worker 运行。官方 Docker 镜像已固定为 Gunicorn 单 worker + 多线程；如果自定义部署，请不要增加 worker 数，需要并发时优先调整线程数。Token 刷新管理的流式任务会使用进程内短期状态，多个 worker 会导致任务初始化和 SSE 订阅落到不同进程。
+
 ### 使用 Docker Compose
 
 ```yaml
@@ -105,6 +109,37 @@ services:
 docker-compose up -d
 ```
 
+#### 可选：启用界面 Docker 在线更新
+
+界面里的 Docker 在线更新需要访问宿主机 Docker socket。`/var/run/docker.sock` 具有宿主机 Docker 管理权限，只建议在可信环境开启。
+
+该功能只适用于使用可变镜像标签的容器，例如 `latest`、`main`、`dev`。如果当前容器固定使用 `v2.0.39` 这类版本标签，界面会拒绝在线更新，因为 Watchtower 不会自动把固定标签切换到新版本标签。
+应用默认会在 daemon 明确返回“最低支持 API 版本”时自动按该版本重试；如果你的 Docker 环境或 socket 代理有特殊兼容要求，也可以显式设置 `DOCKER_UPDATE_API_VERSION`，其值可参考 `docker version --format '{{.Server.APIVersion}}'` 的输出。
+可选环境变量 `DOCKER_UPDATE_STATUS_TIMEOUT` 用于单独控制状态查询和容器 inspect 的超时时间（秒），不影响实际更新任务的 `DOCKER_UPDATE_TIMEOUT`。
+如果当前 `latest` / `main` / `dev` 标签没有新的镜像可拉取，界面会显示本次没有应用更新，而不是误报为更新失败。
+
+```yaml
+version: '3.8'
+services:
+  outlook-mail-reader:
+    image: ghcr.io/assast/outlookemail:latest
+    container_name: outlook-mail-reader
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - LOGIN_PASSWORD=admin123
+      - SECRET_KEY=your-secret-key-here
+      - FLASK_ENV=production
+      - DOCKER_UPDATE_ENABLED=true
+      - DOCKER_UPDATE_CONTAINER=outlook-mail-reader
+      # 可选：在较新的 Docker daemon / socket 代理环境中显式指定 API 版本
+      # - DOCKER_UPDATE_API_VERSION=1.52
+    restart: unless-stopped
+```
+
 ## ✨ 功能特性
 
 ### 邮件读取方式
@@ -125,8 +160,10 @@ docker-compose up -d
 - 🪪 **别名管理** - 支持给单个邮箱配置多个别名邮箱，主邮箱和别名都可用于检索邮件和调用对外 API
 - 🔀 **别名高级用法** - 可将外部邮箱自动转发到本项目管理的邮箱 A，再把外部邮箱配置为 A 的别名，从而通过本项目统一读取邮件
 - 📬 **邮件查看** - Web 界面支持查看收件箱和垃圾邮件；API 支持 `inbox`、`junkemail`、`deleteditems`、`all`
+- 📎 **附件下载** - 邮件详情支持单个附件下载，也支持将全部附件打包为 ZIP 下载
 - 🔍 **全屏查看** - 支持全屏模式查看邮件
 - 📤 **导出功能** - 支持按分组或全部导出邮箱账号信息
+- 🧩 **WebDAV 备份** - 支持将“导出全部分组”的文件按 Cron 定时上传到 WebDAV，也可手动上传
 - 🎨 **现代化 UI** - 四栏布局，账号列表、邮件列表、邮件详情分区清晰
 - ⚡ **性能优化** - 邮件列表与账号列表缓存，分组切换和账号切换更快
 - 📄 **分页加载** - 滚动到底部自动加载下一页（每页20封）
@@ -139,7 +176,7 @@ docker-compose up -d
 - ✅ **批量选择** - 邮箱列表、邮件列表均支持全选当前列表与清空选择
 - 🗑️ **邮件删除** - 单封/批量永久删除邮件
 - 🔄 **API 优先级回退** - Graph API → IMAP(新) → IMAP(旧) 自动回退
-- 🔑 **对外 API** - 通过 API Key 直接获取邮件，无需登录，支持别名邮箱、聚合文件夹和多条件筛选 带+号的附加电子邮箱自动识别，自动回退主邮箱/别名邮箱查询
+- 🔑 **对外 API** - 通过 API Key 直接获取邮件，无需登录，支持别名邮箱、聚合文件夹和多条件筛选 带+号的附加电子邮箱自动识别，自动回退主邮箱/别名邮箱查询；如果要求的功能比较完善，建议直接对接完整API，文档已经改成了适合AI读取的形状，直接喂给AI让AI按照完整API使用登录密码而不是API Key对接即可
 
 #### 邮件转发
 - 📮 **按账号开启转发** - 每个账号单独控制是否参与自动转发
@@ -154,6 +191,12 @@ docker-compose up -d
 - ⏰ **定时刷新** - 支持按天数或 Cron 表达式配置，Docker / Docker Compose 启动也会自动生效
 - 📊 **刷新统计** - 实时显示失败邮箱数量
 - 📜 **刷新历史** - 近半年完整记录
+
+#### WebDAV 备份
+- 🗂️ **全部分组备份** - 备份文件复用“导出全部分组”的格式，包含普通邮箱和临时邮箱分组数据
+- ⏲️ **Cron 定时上传** - 支持 5 段 Cron 表达式，并使用常规设置里的应用时区计算下次执行时间
+- 🧪 **连接测试** - 可在设置页上传并清理测试文件，用于验证 WebDAV 目录是否可写
+- 🔐 **敏感操作确认** - 修改备份设置和手动上传真实备份时需要再次验证登录密码
 
 #### 安全特性
 - 🛡️ XSS 防护 | 🔒 CSRF 防护 | 🔐 数据加密 | 🚦 速率限制 | 📋 审计日志 | 🔑 二次验证
@@ -185,7 +228,7 @@ Web 应用采用四栏式布局设计：
 
 ## 📖 使用说明
 
-### 1. 获取 OAuth2 凭证（这一步非必须，买的账号如果是带令牌的可以跳过这一步）
+### 1. 获取 OAuth2 凭证（这一步非必须，买的账号如果是带令牌的可以跳过这一步; 项目本身也内置了默认的客户端id，如果忽略这一步则使用的是默认客户端id，就可以直接从本节的步骤5开始）
 
 要使用本工具，您需要获取以下 OAuth2 凭证：
 
@@ -331,7 +374,24 @@ user@example.com----app-password----imap.example.com----993
 - 可以手动触发一次转发检查
 - 可以查看最近转发历史和失败记录
 
-### 6. 对外 API
+### 6. WebDAV 备份
+
+在「设置 -> WebDAV 备份」中配置：
+
+1. 填写 WebDAV 目录 URL，例如 `https://dav.example.com/backups`
+2. 按需填写 WebDAV 用户名和密码 / App Password
+3. 填写 5 段 Cron 表达式，例如 `0 3 * * *`
+4. 点击「计算下次执行时间」确认 Cron 预览，时间会使用常规设置里的应用时区
+5. 点击「测试 WebDAV」验证目录可写；测试只上传临时测试文件，不需要登录密码
+6. 修改备份设置时，在“敏感操作确认”中输入登录密码后保存
+
+补充说明：
+
+- 定时备份会上传与“导出全部分组”一致的文本文件，文件名形如 `all_groups_backup_YYYYMMDD_HHMMSS.txt`
+- 「手动上传」会立即上传真实备份文件，需要输入登录密码
+- WebDAV 备份涉及账号、令牌、临时邮箱凭据等敏感数据，建议使用专用 WebDAV 目录并控制访问权限
+
+### 7. 对外 API
 
 通过 API Key 直接获取邮件，无需登录 Web 界面。
 
@@ -378,7 +438,7 @@ curl -H "X-API-Key: your-api-key" \
 | [🚀 部署指南](docs/deployment.md) | Docker、Docker Compose、Nginx/Caddy 部署、环境变量配置 |
 | [⬆️ 升级指南](docs/upgrade.md) | Windows、Docker、Python 直跑升级与回滚建议 |
 | [🔐 安全配置](docs/security.md) | XSS/CSRF 防护、数据加密、速率限制、审计日志 |
-| [📡 API 文档](docs/api.md) | 对外 API、内部 API 端点、代理配置 |
+| [📡 API 文档](docs/api.md) | 对外简易API、完整API、代理配置 |
 | [🛠️ 故障排查](docs/troubleshooting.md) | 常见问题、故障排查步骤 |
 | [📋 更新日志](CHANGELOG.md) | 版本更新历史 |
 | [🚢 发版说明](RELEASE.md) | 标准发版步骤、版本号规则、GitHub Release 说明 |

@@ -12,6 +12,12 @@
                         aria-controls="appVersionPopover" onclick="return toggleVersionPopover()">
                         <span class="app-version-chip__label">版本</span>
                         <span class="app-version-chip__value" id="appVersionValue">v{{ app_version }}</span>
+                        <span class="app-version-chip__upgrade-badge" id="appVersionUpgradeBadge" hidden aria-hidden="true">
+                            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M8 12.5V3.5"></path>
+                                <path d="M4.5 7L8 3.5 11.5 7"></path>
+                            </svg>
+                        </span>
                     </button>
                     <div class="app-version-popover" id="appVersionPopover" role="dialog" aria-label="版本信息"
                         aria-hidden="true" hidden>
@@ -28,6 +34,16 @@
                                 id="appVersionActionLink" data-default-label="查看更新日志">
                                 查看更新日志
                             </a>
+                            <button class="app-version-link app-version-link--primary" id="appVersionDockerUpdateBtn"
+                                type="button" data-default-label="Docker 更新" data-unavailable-label="不可在线更新"
+                                onclick="startDockerUpdate()" hidden>
+                                Docker 更新
+                            </button>
+                        </div>
+                        <div class="app-version-popover__hint">
+                            仅 Docker 版本支持在线更新，请参考
+                            <a href="https://github.com/assast/outlookEmail#readme" target="_blank" rel="noreferrer">README 中的「启用界面 Docker 在线更新」</a>
+                            进行设置。
                         </div>
                     </div>
                 </div>
@@ -136,9 +152,22 @@
                         </button>
                     </div>
                 </div>
-                <!-- Tag Filter Row -->
-                <div id="tagFilterContainer" class="toolbar-row">
-                    <!-- Tags checkboxes will be rendered here -->
+                <div id="accountListOptionsRow" class="toolbar-row account-list-options-row">
+                    <div id="tagFilterContainer" class="account-tag-filter-slot">
+                        <!-- Tags checkboxes will be rendered here -->
+                    </div>
+                    <div id="accountPageSizeContainer" class="account-page-size-row">
+                        <select id="accountPageSizeSelect" class="account-page-size-select"
+                            onchange="handleAccountPageSizeChange(this.value)">
+                            <option value="100">每页 100</option>
+                            <option value="200" selected>每页 200</option>
+                            <option value="500">每页 500</option>
+                            <option value="1000">每页 1000</option>
+                            <option value="2000">每页 2000</option>
+                            <option value="5000">每页 5000</option>
+                            <option value="10000">每页 10000</option>
+                        </select>
+                    </div>
                 </div>
             </div>
             <div class="account-list" id="accountList">
